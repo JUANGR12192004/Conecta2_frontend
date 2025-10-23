@@ -6,6 +6,81 @@ import '../services/api_service.dart';
 import '../widgets/account_management_sheet.dart';
 import '../widgets/profile_popover.dart';
 
+/// Etiquetas legibles para las categorías manejadas por el backend.
+const Map<String, String> kServiceCategoryLabels = {
+  'PLOMERIA': 'Plomería',
+  'CARPINTERIA': 'Carpintería',
+  'ASEO': 'Aseo',
+  'ELECTRICIDAD': 'Electricidad',
+  'PINTURA': 'Pintura',
+  'JARDINERIA': 'Jardinería',
+  'COSTURA': 'Costura',
+  'COCINA': 'Cocina',
+  'TECNOLOGIA': 'Tecnología',
+};
+
+String _stripDiacritics(String input) {
+  const Map<String, String> replacements = {
+    'Á': 'A',
+    'À': 'A',
+    'Ä': 'A',
+    'á': 'A',
+    'à': 'A',
+    'ä': 'A',
+    'É': 'E',
+    'È': 'E',
+    'Ë': 'E',
+    'é': 'E',
+    'è': 'E',
+    'ë': 'E',
+    'Í': 'I',
+    'Ì': 'I',
+    'Ï': 'I',
+    'í': 'I',
+    'ì': 'I',
+    'ï': 'I',
+    'Ó': 'O',
+    'Ò': 'O',
+    'Ö': 'O',
+    'ó': 'O',
+    'ò': 'O',
+    'ö': 'O',
+    'Ú': 'U',
+    'Ù': 'U',
+    'Ü': 'U',
+    'ú': 'U',
+    'ù': 'U',
+    'ü': 'U',
+    'Ñ': 'N',
+    'ñ': 'N',
+  };
+
+  final buffer = StringBuffer();
+  for (final rune in input.runes) {
+    final char = String.fromCharCode(rune);
+    buffer.write(replacements[char] ?? char);
+  }
+  return buffer.toString();
+}
+
+String normalizeCategoryValue(String? raw) {
+  if (raw == null) return '';
+  final sanitized = _stripDiacritics(raw).toUpperCase().trim();
+  if (sanitized.isEmpty) return '';
+  for (final key in kServiceCategoryLabels.keys) {
+    if (_stripDiacritics(key).toUpperCase() == sanitized) {
+      return key;
+    }
+  }
+  return sanitized;
+}
+
+String categoryDisplayLabel(String? value) {
+  if (value == null || value.isEmpty) return '';
+  final normalized = normalizeCategoryValue(value);
+  return kServiceCategoryLabels[normalized] ?? value;
+}
+
 /// =============================================================
 /// ClientHome.dart
 /// - Home del Cliente con HU005 y HU006 conectados al backend
@@ -52,7 +127,7 @@ class ServiceItem {
       id: int.tryParse((j['id'] ?? '0').toString()) ?? 0,
       titulo: (j['titulo'] ?? '').toString(),
       descripcion: (j['descripcion'] ?? '').toString(),
-      categoria: (j['categoria'] ?? '').toString(),
+      categoria: normalizeCategoryValue((j['categoria'] ?? '').toString()),
       ubicacion: (j['ubicacion'] ?? '').toString(),
       fechaEstimada: parseDate(j['fechaEstimada']),
       estado: (j['estado'] ?? 'PENDIENTE').toString(),
@@ -82,17 +157,7 @@ class _ClientHomeState extends State<ClientHome>
   Map<String, dynamic>? _initialArgs;
 
   /// Categorías disponibles (para validar “existe en opciones”)
-  final List<String> _categorias = const [
-    'Plomería',
-    'Carpintería',
-    'Aseo',
-    'Electricidad',
-    'Pintura',
-    'Jardinería',
-    'Costura',
-    'Cocina',
-    'Tecnología',
-  ];
+  final List<String> _categorias = kServiceCategoryLabels.keys.toList();
 
   @override
   void initState() {
@@ -634,7 +699,7 @@ class _ClientHomeState extends State<ClientHome>
                 ],
               ),
               subtitle: Text(
-                '${s.ubicacion} • ${s.categoria}\nFecha: ${_fmtDate(s.fechaEstimada)}',
+                '${s.ubicacion} • ${categoryDisplayLabel(s.categoria)}\nFecha: ${_fmtDate(s.fechaEstimada)}',
               ),
               isThreeLine: true,
               trailing: PopupMenuButton<String>(
@@ -745,10 +810,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
     }
 
     // Validación: categoría existe
-    if (_categoria == null ||
-        !widget.categorias
-            .map((e) => e.toLowerCase())
-            .contains(_categoria!.toLowerCase())) {
+    final categoriaValue = normalizeCategoryValue(_categoria);
+    if (categoriaValue.isEmpty ||
+        !widget.categorias.contains(categoriaValue)) {
       _snack('La categoría seleccionada no es válida.');
       return;
     }
@@ -758,7 +822,7 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
       final resp = await ApiService.createService(
         titulo: _tituloCtrl.text.trim(),
         descripcion: _descripcionCtrl.text.trim(),
-        categoria: _categoria!,
+        categoria: categoriaValue,
         ubicacion: _ubicacionCtrl.text.trim(),
         fechaEstimada: _fecha!,
       );
@@ -848,7 +912,12 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
                 ),
                 value: _categoria,
                 items: widget.categorias
-                    .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                    .map(
+                      (c) => DropdownMenuItem(
+                        value: c,
+                        child: Text(categoryDisplayLabel(c)),
+                      ),
+                    )
                     .toList(),
                 onChanged: (v) => setState(() => _categoria = v),
                 validator: (v) => (v == null || v.trim().isEmpty)
@@ -976,7 +1045,8 @@ class _EditServiceFormState extends State<_EditServiceForm> {
     _tituloCtrl = TextEditingController(text: widget.item.titulo);
     _descripcionCtrl = TextEditingController(text: widget.item.descripcion);
     _ubicacionCtrl = TextEditingController(text: widget.item.ubicacion);
-    _categoria = widget.item.categoria;
+    final normalized = normalizeCategoryValue(widget.item.categoria);
+    _categoria = widget.categorias.contains(normalized) ? normalized : null;
     _fecha = widget.item.fechaEstimada;
   }
 
@@ -1016,10 +1086,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
       return;
     }
 
-    if (_categoria == null ||
-        !widget.categorias
-            .map((e) => e.toLowerCase())
-            .contains(_categoria!.toLowerCase())) {
+    final categoriaValue = normalizeCategoryValue(_categoria);
+    if (categoriaValue.isEmpty ||
+        !widget.categorias.contains(categoriaValue)) {
       _snack('La categoría seleccionada no es válida.');
       return;
     }
@@ -1030,7 +1099,7 @@ class _EditServiceFormState extends State<_EditServiceForm> {
         id: widget.item.id,
         titulo: _tituloCtrl.text.trim(),
         descripcion: _descripcionCtrl.text.trim(),
-        categoria: _categoria!,
+        categoria: categoriaValue,
         ubicacion: _ubicacionCtrl.text.trim(),
         fechaEstimada: _fecha!,
       );
@@ -1124,7 +1193,12 @@ class _EditServiceFormState extends State<_EditServiceForm> {
                 ),
                 value: _categoria,
                 items: widget.categorias
-                    .map((c) => DropdownMenuItem(value: c, child: Text(c)))
+                    .map(
+                      (c) => DropdownMenuItem(
+                        value: c,
+                        child: Text(categoryDisplayLabel(c)),
+                      ),
+                    )
                     .toList(),
                 onChanged: (v) => setState(() => _categoria = v),
                 validator: (v) => (v == null || v.trim().isEmpty)
