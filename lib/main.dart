@@ -7,6 +7,7 @@ import 'pages/Login.dart';
 import 'pages/RegisterWorker.dart';
 import 'pages/RegisterClient.dart';
 import 'pages/ClientHome.dart';
+import 'pages/WorkerHome.dart';
 
 void main() {
   runApp(const MyApp());
@@ -19,7 +20,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-       // ✅ Localizations para DatePicker, etc.
+      // ✅ Localizations para DatePicker, etc.
       localizationsDelegates: const [
         GlobalMaterialLocalizations.delegate,
         GlobalWidgetsLocalizations.delegate,
@@ -45,10 +46,15 @@ class MyApp extends StatelessWidget {
       initialRoute: "/",
       routes: {
         "/": (context) => const HomePage(),
-        "/login": (context) => const LoginPage(),                 // Login único que recibe el rol por arguments
-        "/registerWorker": (context) => const RegisterWorkerPage(), // ✅ nombre correcto de la clase
+        "/login": (context) =>
+            const LoginPage(), // Login único que recibe el rol por arguments
+        "/registerWorker": (context) =>
+            const RegisterWorkerPage(), // ✅ nombre correcto de la clase
         "/registerClient": (context) => const RegisterClientPage(),
-        "/clientHome": (context) => const ClientHome(),       // Pantalla principal del Cliente
+        "/clientHome": (context) =>
+            const ClientHome(), // Pantalla principal del Cliente
+        "/workerHome": (context) =>
+            const WorkerHome(), // Panel inicial del Trabajador
       },
     );
   }
@@ -85,10 +91,7 @@ class _HomePageState extends State<HomePage> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 // Logo Conecta2 (asegúrate de tenerlo en assets y pubspec.yaml)
-                Image.asset(
-                  "assets/LogoConecta2.png",
-                  height: 140,
-                ),
+                Image.asset("assets/LogoConecta2.png", height: 140),
                 const SizedBox(height: 24),
                 const Text(
                   "Bienvenido a Conecta2",

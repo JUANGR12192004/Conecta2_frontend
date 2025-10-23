@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 // TODO: Ajusta esta importación al path real de tu ApiService:
 import '../services/api_service.dart';
+import '../widgets/account_management_sheet.dart';
+import '../widgets/profile_popover.dart';
 
 /// =============================================================
 /// ClientHome.dart
@@ -71,6 +73,14 @@ class _ClientHomeState extends State<ClientHome>
   bool _loading = false;
   String? _error;
 
+  /// Datos del perfil del cliente autenticado
+  Map<String, dynamic>? _profile;
+  bool _profileLoading = false;
+  String? _profileError;
+  int? _clientId;
+  bool _didLoadArgs = false;
+  Map<String, dynamic>? _initialArgs;
+
   /// Categorías disponibles (para validar “existe en opciones”)
   final List<String> _categorias = const [
     'Plomería',
@@ -91,10 +101,197 @@ class _ClientHomeState extends State<ClientHome>
     _reload();
   }
 
+  int? _asInt(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is double) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
+  }
+
+  String _stringFromSources(List<String> keys) {
+    final Map<String, dynamic> combined = {};
+    if (_initialArgs != null) combined.addAll(_initialArgs!);
+    if (_profile != null) combined.addAll(_profile!);
+    for (final key in keys) {
+      final value = combined[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty) return text;
+    }
+    return '';
+  }
+
+  String _currentName() =>
+      _stringFromSources(['nombreCompleto', 'nombre', 'fullName']);
+  String _currentEmail() =>
+      _stringFromSources(['correo', 'email', 'correoElectronico']);
+  String _currentPhone() =>
+      _stringFromSources(['celular', 'telefono', 'phone']);
+
+  String _initialLetter() {
+    final source = _currentName().isNotEmpty ? _currentName() : _currentEmail();
+    if (source.isEmpty) return '?';
+    return source.trim().substring(0, 1).toUpperCase();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_didLoadArgs) return;
+    _didLoadArgs = true;
+
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map) {
+      _initialArgs = Map<String, dynamic>.from(
+        args.map((key, value) => MapEntry(key.toString(), value)),
+      );
+      _clientId = _asInt(args["userId"] ?? args["id"]);
+      final profileArg = args["profile"];
+      if (profileArg is Map<String, dynamic>) {
+        _profile = Map<String, dynamic>.from(profileArg);
+      } else if (profileArg is Map) {
+        _profile = profileArg.map(
+          (key, value) => MapEntry(key.toString(), value),
+        );
+      }
+    }
+
+    if (_clientId != null) {
+      _refreshProfile();
+    }
+  }
+
   @override
   void dispose() {
     _tab.dispose();
     super.dispose();
+  }
+
+  Future<void> _refreshProfile() async {
+    final id = _clientId;
+    if (id == null) return;
+
+    setState(() {
+      _profileLoading = true;
+      _profileError = null;
+    });
+
+    try {
+      final data = await ApiService.fetchClientById(id);
+      if (!mounted) return;
+      setState(() {
+        _profile = data;
+        _profileLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _profileError = e.toString().replaceFirst('Exception: ', '');
+        _profileLoading = false;
+      });
+    }
+  }
+
+  Future<void> _openAccountManager() async {
+    final id = _clientId;
+    if (id == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No fue posible cargar los datos de tu cuenta.'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
+    final updated = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (_) => AccountManagementSheet(
+        userId: id,
+        role: 'client',
+        initialData: _profile,
+      ),
+    );
+
+    if (updated != null && mounted) {
+      setState(() => _profile = updated);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Datos de cuenta actualizados'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: _primary,
+        ),
+      );
+      await _refreshProfile();
+    }
+  }
+
+  Future<void> _logout() async {
+    ApiService.clearToken();
+    if (!mounted) return;
+    Navigator.pushNamedAndRemoveUntil(context, "/", (route) => false);
+  }
+
+  Future<void> _showProfileMenu() async {
+    final email = _currentEmail();
+    final name = _currentName();
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: true,
+      builder: (_) => ProfilePopover(
+        name: name,
+        email: email.isNotEmpty ? email : 'Mi cuenta',
+        initialLetter: _initialLetter(),
+        accentColor: _primary,
+      ),
+    );
+
+    if (result == 'manage') {
+      await _openAccountManager();
+    } else if (result == 'logout') {
+      await _logout();
+    }
+  }
+
+  Widget _buildProfileCard() {
+    final nombre = _currentName();
+    final correo = _currentEmail();
+    final celular = _currentPhone();
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      elevation: 0,
+      color: Colors.grey[100],
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: _primary.withOpacity(0.12),
+          child: const Icon(Icons.person_outline, color: _primary),
+        ),
+        title: Text(
+          nombre.isEmpty ? 'Mi cuenta' : nombre,
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (correo.isNotEmpty) Text(correo),
+            if (celular.isNotEmpty) Text(celular),
+          ],
+        ),
+        trailing: IconButton(
+          icon: const Icon(Icons.manage_accounts_outlined, color: _primary),
+          tooltip: 'Editar cuenta',
+          onPressed: _openAccountManager,
+        ),
+      ),
+    );
   }
 
   Future<void> _reload() async {
@@ -109,10 +306,15 @@ class _ClientHomeState extends State<ClientHome>
         _loading = false;
       });
     } catch (e) {
+      final msg = e.toString();
       setState(() {
-        _error = "$e";
+        _error = msg;
         _loading = false;
       });
+      if (mounted && msg.toLowerCase().contains("no autorizado")) {
+        _snack("Sesión expirada. Vuelve a iniciar sesión.");
+        await _logout();
+      }
     }
   }
 
@@ -130,9 +332,7 @@ class _ClientHomeState extends State<ClientHome>
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
-        child: _PublishServiceForm(
-          categorias: _categorias,
-        ),
+        child: _PublishServiceForm(categorias: _categorias),
       ),
     );
 
@@ -170,10 +370,7 @@ class _ClientHomeState extends State<ClientHome>
         padding: EdgeInsets.only(
           bottom: MediaQuery.of(context).viewInsets.bottom,
         ),
-        child: _EditServiceForm(
-          categorias: _categorias,
-          item: s,
-        ),
+        child: _EditServiceForm(categorias: _categorias, item: s),
       ),
     );
 
@@ -196,8 +393,14 @@ class _ClientHomeState extends State<ClientHome>
           '¿Eliminar el servicio "${s.titulo}"?\nEsta acción no se puede deshacer.',
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancelar")),
-          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text("Eliminar")),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text("Cancelar"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text("Eliminar"),
+          ),
         ],
       ),
     );
@@ -239,6 +442,31 @@ class _ClientHomeState extends State<ClientHome>
     }
   }
 
+  Widget _buildProfileAvatar() {
+    final letter = _initialLetter();
+    return CircleAvatar(
+      radius: 18,
+      backgroundColor: _primary,
+      child: Text(
+        letter,
+        style: const TextStyle(
+          color: Colors.white,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  void _showComingSoon() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Esta sección estará disponible próximamente.'),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -254,20 +482,50 @@ class _ClientHomeState extends State<ClientHome>
         ),
         title: const Text(
           'Conecta2',
-          style: TextStyle(
-            color: Colors.black,
-            fontWeight: FontWeight.w800,
-          ),
+          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800),
         ),
-        actions: const [
+        actions: [
+          IconButton(
+            icon: const Icon(
+              Icons.notifications_outlined,
+              color: Colors.black87,
+            ),
+            tooltip: 'Notificaciones',
+            onPressed: _showComingSoon,
+          ),
           Padding(
-            padding: EdgeInsets.only(right: 12),
-            child: Icon(Icons.notifications_outlined, color: Colors.black87),
+            padding: const EdgeInsets.only(right: 14),
+            child: GestureDetector(
+              onTap: _showProfileMenu,
+              child: _buildProfileAvatar(),
+            ),
           ),
         ],
       ),
       body: Column(
-        children: [   
+        children: [
+          if (_profileLoading) const LinearProgressIndicator(minHeight: 2),
+          if (_profile != null) _buildProfileCard(),
+          if (_profileError != null && _profile == null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Material(
+                color: Colors.red.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(12),
+                child: ListTile(
+                  leading: const Icon(Icons.error_outline, color: Colors.red),
+                  title: Text(
+                    '$_profileError',
+                    style: const TextStyle(color: Colors.red),
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.refresh, color: Colors.red),
+                    tooltip: 'Reintentar',
+                    onPressed: _clientId != null ? _refreshProfile : null,
+                  ),
+                ),
+              ),
+            ),
           Container(
             margin: const EdgeInsets.all(16),
             child: TabBar(
@@ -298,8 +556,10 @@ class _ClientHomeState extends State<ClientHome>
                     children: [
                       Icon(Icons.map_outlined, size: 64, color: Colors.black38),
                       SizedBox(height: 8),
-                      Text('Vista de Mapa en construcción🔧...',
-                          style: TextStyle(color: Colors.black54)),
+                      Text(
+                        'Vista de Mapa en construcción🔧...',
+                        style: TextStyle(color: Colors.black54),
+                      ),
                     ],
                   ),
                 ),
@@ -350,7 +610,10 @@ class _ClientHomeState extends State<ClientHome>
             child: ListTile(
               leading: CircleAvatar(
                 backgroundColor: _secondary.withOpacity(.15),
-                child: const Icon(Icons.home_repair_service_rounded, color: _primary),
+                child: const Icon(
+                  Icons.home_repair_service_rounded,
+                  color: _primary,
+                ),
               ),
               title: Row(
                 children: [
@@ -375,7 +638,9 @@ class _ClientHomeState extends State<ClientHome>
               ),
               isThreeLine: true,
               trailing: PopupMenuButton<String>(
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
                 onSelected: (value) {
                   if (value == 'editar') {
                     _openEditSheet(s);
@@ -481,7 +746,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
 
     // Validación: categoría existe
     if (_categoria == null ||
-        !widget.categorias.map((e) => e.toLowerCase()).contains(_categoria!.toLowerCase())) {
+        !widget.categorias
+            .map((e) => e.toLowerCase())
+            .contains(_categoria!.toLowerCase())) {
       _snack('La categoría seleccionada no es válida.');
       return;
     }
@@ -522,8 +789,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding:
-          const EdgeInsets.symmetric(horizontal: 16).copyWith(top: 16, bottom: 22),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+      ).copyWith(top: 16, bottom: 22),
       child: SingleChildScrollView(
         child: Form(
           key: _formKey,
@@ -551,8 +819,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
                   labelText: 'Título *',
                   prefixIcon: Icon(Icons.title),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'El título no debe estar vacío' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'El título no debe estar vacío'
+                    : null,
               ),
               const SizedBox(height: 12),
 
@@ -595,8 +864,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
                   labelText: 'Ubicación *',
                   prefixIcon: Icon(Icons.location_on_outlined),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'La ubicación es obligatoria' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'La ubicación es obligatoria'
+                    : null,
               ),
               const SizedBox(height: 12),
 
@@ -613,9 +883,13 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        _fecha == null ? 'Selecciona una fecha' : _fmtDate(_fecha!),
+                        _fecha == null
+                            ? 'Selecciona una fecha'
+                            : _fmtDate(_fecha!),
                         style: TextStyle(
-                          color: _fecha == null ? Colors.black45 : Colors.black87,
+                          color: _fecha == null
+                              ? Colors.black45
+                              : Colors.black87,
                         ),
                       ),
                       const Icon(Icons.calendar_today, size: 18),
@@ -646,7 +920,10 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
                           ? const SizedBox(
                               height: 18,
                               width: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
                             )
                           : const Text('Publicar'),
                     ),
@@ -676,10 +953,7 @@ class _EditServiceForm extends StatefulWidget {
   final List<String> categorias;
   final ServiceItem item;
 
-  const _EditServiceForm({
-    required this.categorias,
-    required this.item,
-  });
+  const _EditServiceForm({required this.categorias, required this.item});
 
   @override
   State<_EditServiceForm> createState() => _EditServiceFormState();
@@ -743,7 +1017,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
     }
 
     if (_categoria == null ||
-        !widget.categorias.map((e) => e.toLowerCase()).contains(_categoria!.toLowerCase())) {
+        !widget.categorias
+            .map((e) => e.toLowerCase())
+            .contains(_categoria!.toLowerCase())) {
       _snack('La categoría seleccionada no es válida.');
       return;
     }
@@ -761,11 +1037,13 @@ class _EditServiceFormState extends State<_EditServiceForm> {
 
       if (!mounted) return;
       Navigator.of(context).pop(); // cerramos la hoja
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('✅ Servicio actualizado'),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: _primary,
-      ));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('✅ Servicio actualizado'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: _primary,
+        ),
+      );
     } catch (e) {
       _snack('Error al actualizar: $e');
     } finally {
@@ -787,8 +1065,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding:
-          const EdgeInsets.symmetric(horizontal: 16).copyWith(top: 16, bottom: 22),
+      padding: const EdgeInsets.symmetric(
+        horizontal: 16,
+      ).copyWith(top: 16, bottom: 22),
       child: SingleChildScrollView(
         child: Form(
           key: _formKey,
@@ -816,8 +1095,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
                   labelText: 'Título *',
                   prefixIcon: Icon(Icons.title),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'El título no debe estar vacío' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'El título no debe estar vacío'
+                    : null,
               ),
               const SizedBox(height: 12),
 
@@ -860,8 +1140,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
                   labelText: 'Ubicación *',
                   prefixIcon: Icon(Icons.location_on_outlined),
                 ),
-                validator: (v) =>
-                    (v == null || v.trim().isEmpty) ? 'La ubicación es obligatoria' : null,
+                validator: (v) => (v == null || v.trim().isEmpty)
+                    ? 'La ubicación es obligatoria'
+                    : null,
               ),
               const SizedBox(height: 12),
 
@@ -878,9 +1159,13 @@ class _EditServiceFormState extends State<_EditServiceForm> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        _fecha == null ? 'Selecciona una fecha' : _fmtDate(_fecha!),
+                        _fecha == null
+                            ? 'Selecciona una fecha'
+                            : _fmtDate(_fecha!),
                         style: TextStyle(
-                          color: _fecha == null ? Colors.black45 : Colors.black87,
+                          color: _fecha == null
+                              ? Colors.black45
+                              : Colors.black87,
                         ),
                       ),
                       const Icon(Icons.calendar_today, size: 18),
@@ -911,7 +1196,10 @@ class _EditServiceFormState extends State<_EditServiceForm> {
                           ? const SizedBox(
                               height: 18,
                               width: 18,
-                              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
                             )
                           : const Text('Guardar'),
                     ),
@@ -933,5 +1221,3 @@ class _EditServiceFormState extends State<_EditServiceForm> {
     );
   }
 }
-
-

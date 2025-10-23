@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 
-
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
 
@@ -24,7 +23,8 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final args = ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
+    final args =
+        ModalRoute.of(context)?.settings.arguments as Map<String, dynamic>?;
     final raw = (args?['role'] as String?)?.toLowerCase().trim();
     _role = (raw == 'worker' || raw == 'client') ? raw! : 'client'; // default
   }
@@ -34,8 +34,29 @@ class _LoginPageState extends State<LoginPage> {
   Color get secondary =>
       _role == 'worker' ? const Color(0xFF64B5F6) : const Color(0xFF66BB6A);
 
-  String get title =>
-      _role == 'worker' ? "Inicia sesión como Trabajador" : "Inicia sesión como Cliente";
+  String get title => _role == 'worker'
+      ? "Inicia sesión como Trabajador"
+      : "Inicia sesión como Cliente";
+
+  int? _extractUserId(Map<String, dynamic> payload) {
+    const candidates = [
+      'id',
+      'userId',
+      'usuarioId',
+      'clienteId',
+      'trabajadorId',
+    ];
+    for (final key in candidates) {
+      final value = payload[key];
+      if (value == null) continue;
+      if (value is int) return value;
+      if (value is String) {
+        final parsed = int.tryParse(value);
+        if (parsed != null) return parsed;
+      }
+    }
+    return null;
+  }
 
   // 🔹 Banner para cuenta no verificada
   void _showUnverifiedBanner() {
@@ -95,13 +116,16 @@ class _LoginPageState extends State<LoginPage> {
         ),
       );
 
-      // TODO: Reemplaza por tu pantalla después de login
-       Navigator.pushReplacementNamed(context, "/clientHome");
+      // Redireccion segun el rol autenticado
+      final route = _role == 'worker' ? '/workerHome' : '/clientHome';
+      final args = <String, dynamic>{"role": _role, "profile": resp};
+      final userId = _extractUserId(resp);
+      if (userId != null) args["userId"] = userId;
 
+      Navigator.pushReplacementNamed(context, route, arguments: args);
     } catch (e) {
       if (!mounted) return;
       // 👇 AQUI: redirige al Home del Cliente
-     
 
       // 🔹 Detección simple del caso "Cuenta no verificada"
       final msg = e.toString();
@@ -161,13 +185,19 @@ class _LoginPageState extends State<LoginPage> {
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 24,
+                    ),
                     child: Form(
                       key: _formKey,
                       child: Column(
                         children: [
-                          Icon(_role == 'worker' ? Icons.work : Icons.person,
-                              size: 56, color: primary),
+                          Icon(
+                            _role == 'worker' ? Icons.work : Icons.person,
+                            size: 56,
+                            color: primary,
+                          ),
                           const SizedBox(height: 12),
                           Text(
                             title,
@@ -208,12 +238,18 @@ class _LoginPageState extends State<LoginPage> {
                               labelText: "Contraseña",
                               prefixIcon: const Icon(Icons.lock),
                               suffixIcon: IconButton(
-                                onPressed: () => setState(() => _obscure = !_obscure),
-                                icon: Icon(_obscure ? Icons.visibility : Icons.visibility_off),
+                                onPressed: () =>
+                                    setState(() => _obscure = !_obscure),
+                                icon: Icon(
+                                  _obscure
+                                      ? Icons.visibility
+                                      : Icons.visibility_off,
+                                ),
                               ),
                             ),
-                            validator: (v) =>
-                                (v == null || v.isEmpty) ? "Ingresa tu contraseña" : null,
+                            validator: (v) => (v == null || v.isEmpty)
+                                ? "Ingresa tu contraseña"
+                                : null,
                           ),
                           const SizedBox(height: 8),
 
@@ -257,13 +293,19 @@ class _LoginPageState extends State<LoginPage> {
                           // Ir a registro según rol
                           TextButton(
                             onPressed: _goToRegister,
-                            child: const Text("¿No tienes cuenta? Regístrate aquí"),
+                            child: const Text(
+                              "¿No tienes cuenta? Regístrate aquí",
+                            ),
                           ),
 
                           // Volver al inicio (selector de rol)
                           TextButton(
                             onPressed: () {
-                              Navigator.pushNamedAndRemoveUntil(context, "/", (route) => false);
+                              Navigator.pushNamedAndRemoveUntil(
+                                context,
+                                "/",
+                                (route) => false,
+                              );
                             },
                             child: const Text("⬅️ Volver al inicio"),
                           ),
