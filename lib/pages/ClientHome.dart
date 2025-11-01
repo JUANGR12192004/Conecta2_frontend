@@ -1,154 +1,23 @@
-// ignore: unused_import
-import 'dart:convert';
 import 'package:flutter/material.dart';
-// TODO: Ajusta esta importación al path real de tu ApiService:
+
 import '../services/api_service.dart';
 import '../widgets/account_management_sheet.dart';
 import '../widgets/profile_popover.dart';
+import '../utils/categories.dart';
+import '../widgets/current_location_map.dart';
 
-/// Etiquetas legibles para las categorías manejadas por el backend.
-const Map<String, String> kServiceCategoryLabels = {
-  'PLOMERIA': 'Plomería',
-  'CARPINTERIA': 'Carpintería',
-  'ASEO': 'Aseo',
-  'ELECTRICIDAD': 'Electricidad',
-  'PINTURA': 'Pintura',
-  'JARDINERIA': 'Jardinería',
-  'COSTURA': 'Costura',
-  'COCINA': 'Cocina',
-  'TECNOLOGIA': 'Tecnología',
-};
-
-String _stripDiacritics(String input) {
-  const Map<String, String> replacements = {
-    'Á': 'A',
-    'À': 'A',
-    'Ä': 'A',
-    'á': 'A',
-    'à': 'A',
-    'ä': 'A',
-    'É': 'E',
-    'È': 'E',
-    'Ë': 'E',
-    'é': 'E',
-    'è': 'E',
-    'ë': 'E',
-    'Í': 'I',
-    'Ì': 'I',
-    'Ï': 'I',
-    'í': 'I',
-    'ì': 'I',
-    'ï': 'I',
-    'Ó': 'O',
-    'Ò': 'O',
-    'Ö': 'O',
-    'ó': 'O',
-    'ò': 'O',
-    'ö': 'O',
-    'Ú': 'U',
-    'Ù': 'U',
-    'Ü': 'U',
-    'ú': 'U',
-    'ù': 'U',
-    'ü': 'U',
-    'Ñ': 'N',
-    'ñ': 'N',
-  };
-
-  final buffer = StringBuffer();
-  for (final rune in input.runes) {
-    final char = String.fromCharCode(rune);
-    buffer.write(replacements[char] ?? char);
-  }
-  return buffer.toString();
-}
-
-String normalizeCategoryValue(String? raw) {
-  if (raw == null) return '';
-  final sanitized = _stripDiacritics(raw).toUpperCase().trim();
-  if (sanitized.isEmpty) return '';
-  for (final key in kServiceCategoryLabels.keys) {
-    if (_stripDiacritics(key).toUpperCase() == sanitized) {
-      return key;
-    }
-  }
-  return sanitized;
-}
-
-String categoryDisplayLabel(String? value) {
-  if (value == null || value.isEmpty) return '';
-  final normalized = normalizeCategoryValue(value);
-  return kServiceCategoryLabels[normalized] ?? value;
-}
-
-/// =============================================================
-/// ClientHome.dart
-/// - Home del Cliente con HU005 y HU006 conectados al backend
-/// - UI basada en tu versión original, con lista/tabs/form modal
-/// =============================================================
+const _primary = Color(0xFF2E7D32);
 
 class ClientHome extends StatefulWidget {
   static const String routeName = '/clientHome';
-
   const ClientHome({super.key});
-
   @override
   State<ClientHome> createState() => _ClientHomeState();
 }
 
-/// Modelo para un servicio publicado (adaptado al backend)
-class ServiceItem {
-  final int id;
-  final String titulo;
-  final String descripcion;
-  final String categoria;
-  final String ubicacion;
-  final DateTime fechaEstimada;
-  final String estado; // PENDIENTE | EN_PROCESO | FINALIZADO | CANCELADO
-
-  ServiceItem({
-    required this.id,
-    required this.titulo,
-    required this.descripcion,
-    required this.categoria,
-    required this.ubicacion,
-    required this.fechaEstimada,
-    required this.estado,
-  });
-
-  factory ServiceItem.fromJson(Map<String, dynamic> j) {
-    DateTime parseDate(dynamic v) {
-      if (v == null) return DateTime.now();
-      if (v is String) return DateTime.tryParse(v) ?? DateTime.now();
-      return DateTime.now();
-    }
-
-    return ServiceItem(
-      id: int.tryParse((j['id'] ?? '0').toString()) ?? 0,
-      titulo: (j['titulo'] ?? '').toString(),
-      descripcion: (j['descripcion'] ?? '').toString(),
-      categoria: normalizeCategoryValue((j['categoria'] ?? '').toString()),
-      ubicacion: (j['ubicacion'] ?? '').toString(),
-      fechaEstimada: parseDate(j['fechaEstimada']),
-      estado: (j['estado'] ?? 'PENDIENTE').toString(),
-    );
-  }
-}
-
-/// Paleta Cliente
-const _primary = Color(0xFF2E7D32);
-const _secondary = Color(0xFF66BB6A);
-
-class _ClientHomeState extends State<ClientHome>
-    with SingleTickerProviderStateMixin {
+class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateMixin {
   late TabController _tab;
 
-  /// Lista de servicios disponibles (desde backend)
-  List<ServiceItem> _services = [];
-  bool _loading = false;
-  String? _error;
-
-  /// Datos del perfil del cliente autenticado
   Map<String, dynamic>? _profile;
   bool _profileLoading = false;
   String? _profileError;
@@ -156,7 +25,17 @@ class _ClientHomeState extends State<ClientHome>
   bool _didLoadArgs = false;
   Map<String, dynamic>? _initialArgs;
 
-  /// Categorías disponibles (para validar “existe en opciones”)
+  List<Map<String, dynamic>> _services = [];
+  bool _loading = false;
+  String? _error;
+
+  // Ofertas in-app
+  List<Map<String, dynamic>> _offers = [];
+  bool _offersLoading = false;
+  String? _offersError;
+  Duration _offersPollEvery = const Duration(seconds: 15);
+  Future<void>? _offersPollTimer;
+
   final List<String> _categorias = kServiceCategoryLabels.keys.toList();
 
   @override
@@ -164,6 +43,38 @@ class _ClientHomeState extends State<ClientHome>
     super.initState();
     _tab = TabController(length: 2, vsync: this);
     _reload();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_didLoadArgs) return;
+    _didLoadArgs = true;
+    final args = ModalRoute.of(context)?.settings.arguments;
+    if (args is Map) {
+      _initialArgs = Map<String, dynamic>.from(
+        args.map((k, v) => MapEntry(k.toString(), v)),
+      );
+      _clientId = _asInt(args['userId'] ?? args['id']);
+      final profileArg = args['profile'];
+      if (profileArg is Map<String, dynamic>) {
+        _profile = Map<String, dynamic>.from(profileArg);
+      } else if (profileArg is Map) {
+        _profile = profileArg.map((k, v) => MapEntry(k.toString(), v));
+      }
+    }
+
+    if (_clientId != null) {
+      _refreshProfile();
+      _startOffersPolling();
+    }
+  }
+
+  @override
+  void dispose() {
+    _tab.dispose();
+    _stopOffersPolling();
+    super.dispose();
   }
 
   int? _asInt(dynamic value) {
@@ -187,113 +98,286 @@ class _ClientHomeState extends State<ClientHome>
     return '';
   }
 
-  String _currentName() =>
-      _stringFromSources(['nombreCompleto', 'nombre', 'fullName']);
-  String _currentEmail() =>
-      _stringFromSources(['correo', 'email', 'correoElectronico']);
-  String _currentPhone() =>
-      _stringFromSources(['celular', 'telefono', 'phone']);
+  String _currentName() => _stringFromSources(['nombreCompleto', 'nombre', 'fullName']);
+  String _currentEmail() => _stringFromSources(['correo', 'email', 'correoElectronico']);
 
-  String _initialLetter() {
-    final source = _currentName().isNotEmpty ? _currentName() : _currentEmail();
-    if (source.isEmpty) return '?';
-    return source.trim().substring(0, 1).toUpperCase();
+  Future<void> _reload() async {
+    await _loadServices();
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (_didLoadArgs) return;
-    _didLoadArgs = true;
-
-    final args = ModalRoute.of(context)?.settings.arguments;
-    if (args is Map) {
-      _initialArgs = Map<String, dynamic>.from(
-        args.map((key, value) => MapEntry(key.toString(), value)),
-      );
-      _clientId = _asInt(args["userId"] ?? args["id"]);
-      final profileArg = args["profile"];
-      if (profileArg is Map<String, dynamic>) {
-        _profile = Map<String, dynamic>.from(profileArg);
-      } else if (profileArg is Map) {
-        _profile = profileArg.map(
-          (key, value) => MapEntry(key.toString(), value),
-        );
-      }
+  Future<void> _loadServices() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final list = await ApiService.getServices();
+      if (!mounted) return;
+      setState(() {
+        _services = list;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString().replaceFirst('Exception: ', '');
+        _loading = false;
+      });
     }
-
-    if (_clientId != null) {
-      _refreshProfile();
-    }
-  }
-
-  @override
-  void dispose() {
-    _tab.dispose();
-    super.dispose();
   }
 
   Future<void> _refreshProfile() async {
     final id = _clientId;
     if (id == null) return;
-
-    setState(() {
-      _profileLoading = true;
-      _profileError = null;
-    });
-
+    setState(() { _profileLoading = true; _profileError = null; });
     try {
       final data = await ApiService.fetchClientById(id);
       if (!mounted) return;
-      setState(() {
-        _profile = data;
-        _profileLoading = false;
-      });
+      setState(() { _profile = data; _profileLoading = false; });
     } catch (e) {
       if (!mounted) return;
-      setState(() {
-        _profileError = e.toString().replaceFirst('Exception: ', '');
-        _profileLoading = false;
-      });
+      setState(() { _profileError = e.toString().replaceFirst('Exception: ', ''); _profileLoading = false; });
     }
   }
 
-  Future<void> _openAccountManager() async {
-    final id = _clientId;
-    if (id == null) {
+  // Ofertas
+  void _startOffersPolling() {
+    _offersPollTimer = Future.delayed(_offersPollEvery, () async {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('No fue posible cargar los datos de tu cuenta.'),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
+      await _fetchOffers();
+      if (!mounted) return;
+      _startOffersPolling();
+    });
+  }
 
+  void _stopOffersPolling() { _offersPollTimer = null; }
+
+  Future<void> _fetchOffers() async {
+    final id = _clientId; if (id == null) return;
+    setState(() { _offersLoading = true; _offersError = null; });
+    try {
+      final list = await ApiService.getClientPendingOffers(id);
+      if (!mounted) return;
+      setState(() { _offers = list; _offersLoading = false; });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() { _offersError = e.toString().replaceFirst('Exception: ', ''); _offersLoading = false; });
+    }
+  }
+
+  Future<void> _openNotifications() async {
+    await _fetchOffers();
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (ctx) {
+        return StatefulBuilder(builder: (ctx, setM) {
+          Future<void> doAccept(int id) async {
+            try {
+              await ApiService.respondOffer(offerId: id, action: 'ACCEPT');
+              setM(() => _offers.removeWhere((o) => (o['id'] ?? 0) == id));
+              // Refresca lista de servicios para reflejar estado ASIGNADO
+              await _loadServices();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Servicio asignado'), behavior: SnackBarBehavior.floating, backgroundColor: _primary),
+                );
+              }
+            } catch (e) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+              );
+            }
+          }
+
+          Future<void> doReject(int id) async {
+            try {
+              await ApiService.respondOffer(offerId: id, action: 'REJECT');
+              setM(() => _offers.removeWhere((o) => (o['id'] ?? 0) == id));
+            } catch (e) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+              );
+            }
+          }
+
+          Future<void> doCounter(int id) async {
+            final ctrl = TextEditingController();
+            final newPrice = await showDialog<double?>(
+              context: context,
+              builder: (_) => AlertDialog(
+                title: const Text('Enviar contraoferta'),
+                content: TextField(
+                  controller: ctrl,
+                  keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Nuevo precio',
+                    prefixIcon: Icon(Icons.attach_money),
+                  ),
+                ),
+                actions: [
+                  TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
+                  TextButton(onPressed: () {
+                    final raw = ctrl.text.trim().replaceAll(',', '.');
+                    final v = double.tryParse(raw);
+                    Navigator.pop(context, v);
+                  }, child: const Text('Enviar')),
+                ],
+              ),
+            );
+            if (newPrice == null || newPrice <= 0) return;
+            try {
+              await ApiService.respondOffer(offerId: id, action: 'COUNTER', precio: newPrice);
+              setM(() => _offers.removeWhere((o) => (o['id'] ?? 0) == id));
+            } catch (e) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+              );
+            }
+          }
+
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 22),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8))),
+                const SizedBox(height: 12),
+                const Text('Notificaciones', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
+                const SizedBox(height: 8),
+                if (_offersLoading && _offers.isEmpty)
+                  const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
+                else if (_offersError != null)
+                  Material(
+                    color: Colors.red.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(12),
+                    child: ListTile(
+                      leading: const Icon(Icons.error_outline, color: Colors.red),
+                      title: Text('$_offersError', style: const TextStyle(color: Colors.red)),
+                      trailing: IconButton(icon: const Icon(Icons.refresh, color: Colors.red), onPressed: _fetchOffers),
+                    ),
+                  )
+                else if (_offers.isEmpty)
+                  const Padding(padding: EdgeInsets.all(12), child: Text('No tienes ofertas nuevas.', style: TextStyle(color: Colors.black54)))
+                else
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: _offers.length,
+                      separatorBuilder: (_, __) => const Divider(height: 16),
+                      itemBuilder: (context, i) {
+                        final o = _offers[i];
+                        final workerName = (o['workerName'] ?? o['trabajador'] ?? 'Trabajador').toString();
+                        final precio = (o['precio'] ?? o['monto'] ?? '').toString();
+                        final titulo = (o['serviceTitle'] ?? o['tituloServicio'] ?? '').toString();
+                        final offerId = () { final v = o['id']; if (v is int) return v; return int.tryParse(v.toString()) ?? 0; }();
+                        return ListTile(
+                          leading: const CircleAvatar(child: Icon(Icons.campaign_outlined)),
+                          title: Text('$workerName ofertó'),
+                          subtitle: Text([
+                            if (titulo.isNotEmpty) 'Servicio: $titulo',
+                            if (precio.isNotEmpty) 'Precio: $precio',
+                          ].join(' • ')),
+                          trailing: Wrap(
+                            spacing: 8,
+                            children: [
+                              IconButton(tooltip: 'Aceptar', icon: const Icon(Icons.check_circle, color: Colors.green), onPressed: () => doAccept(offerId)),
+                              IconButton(tooltip: 'Rechazar', icon: const Icon(Icons.cancel, color: Colors.red), onPressed: () => doReject(offerId)),
+                              IconButton(tooltip: 'Contraoferta', icon: const Icon(Icons.swap_horiz, color: Colors.orange), onPressed: () => doCounter(offerId)),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          );
+        });
+      },
+    );
+  }
+
+  Future<void> _openEditForm(int serviceId, Map<String, dynamic> initial) async {
     final updated = await showModalBottomSheet<Map<String, dynamic>>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.white,
       useSafeArea: true,
-      builder: (_) => AccountManagementSheet(
-        userId: id,
-        role: 'client',
-        initialData: _profile,
+      builder: (_) => _EditServiceForm(
+        serviceId: serviceId,
+        categorias: _categorias,
+        initial: initial,
       ),
     );
+    if (updated != null) {
+      await _loadServices();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Servicio actualizado'), behavior: SnackBarBehavior.floating, backgroundColor: _primary),
+      );
+    }
+  }
 
+  Future<void> _confirmDelete(int serviceId) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Eliminar servicio'),
+        content: const Text('¿Seguro que deseas eliminar esta publicación?'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancelar')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('Eliminar', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await ApiService.deleteService(serviceId);
+      await _loadServices();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Servicio eliminado'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.black87),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  Future<void> _openAccountManager() async {
+    final id = _clientId; if (id == null) return;
+    final updated = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (_) => AccountManagementSheet(userId: id, role: 'client', initialData: _profile),
+    );
     if (updated != null && mounted) {
       setState(() => _profile = updated);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Datos de cuenta actualizados'),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: _primary,
-        ),
-      );
       await _refreshProfile();
+    }
+  }
+
+  Future<void> _openPublishForm() async {
+    final created = await showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (_) => _PublishServiceForm(categorias: _categorias),
+    );
+    if (created != null) {
+      await _loadServices();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Servicio publicado con éxito'), behavior: SnackBarBehavior.floating, backgroundColor: _primary));
     }
   }
 
@@ -309,227 +393,13 @@ class _ClientHomeState extends State<ClientHome>
     final result = await showDialog<String>(
       context: context,
       barrierDismissible: true,
-      builder: (_) => ProfilePopover(
-        name: name,
-        email: email.isNotEmpty ? email : 'Mi cuenta',
-        initialLetter: _initialLetter(),
-        accentColor: _primary,
-      ),
+      builder: (_) => ProfilePopover(name: name, email: email.isNotEmpty ? email : 'Mi cuenta', initialLetter: name.isNotEmpty ? name[0].toUpperCase() : '?', accentColor: _primary),
     );
-
     if (result == 'manage') {
       await _openAccountManager();
     } else if (result == 'logout') {
       await _logout();
     }
-  }
-
-  Widget _buildProfileCard() {
-    final nombre = _currentName();
-    final correo = _currentEmail();
-    final celular = _currentPhone();
-
-    return Card(
-      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-      elevation: 0,
-      color: Colors.grey[100],
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: _primary.withOpacity(0.12),
-          child: const Icon(Icons.person_outline, color: _primary),
-        ),
-        title: Text(
-          nombre.isEmpty ? 'Mi cuenta' : nombre,
-          style: const TextStyle(fontWeight: FontWeight.w700),
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (correo.isNotEmpty) Text(correo),
-            if (celular.isNotEmpty) Text(celular),
-          ],
-        ),
-        trailing: IconButton(
-          icon: const Icon(Icons.manage_accounts_outlined, color: _primary),
-          tooltip: 'Editar cuenta',
-          onPressed: _openAccountManager,
-        ),
-      ),
-    );
-  }
-
-  Future<void> _reload() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final list = await ApiService.getServices();
-      setState(() {
-        _services = list.map((m) => ServiceItem.fromJson(m)).toList();
-        _loading = false;
-      });
-    } catch (e) {
-      final msg = e.toString();
-      setState(() {
-        _error = msg;
-        _loading = false;
-      });
-      if (mounted && msg.toLowerCase().contains("no autorizado")) {
-        _snack("Sesión expirada. Vuelve a iniciar sesión.");
-        await _logout();
-      }
-    }
-  }
-
-  /// Abre el formulario de publicación (HU005)
-  void _openPublishForm() async {
-    final created = await showModalBottomSheet<ServiceItem>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: _PublishServiceForm(categorias: _categorias),
-      ),
-    );
-
-    if (created != null) {
-      // Refrescamos desde backend para mantener consistencia
-      await _reload();
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Servicio publicado con éxito'),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: _primary,
-        ),
-      );
-      _tab.animateTo(0);
-    }
-  }
-
-  /// Editar servicio (HU006)
-  Future<void> _openEditSheet(ServiceItem s) async {
-    if (s.estado != "PENDIENTE") {
-      _snack("Solo los servicios PENDIENTES pueden editarse.");
-      return;
-    }
-
-    await showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (_) => Padding(
-        padding: EdgeInsets.only(
-          bottom: MediaQuery.of(context).viewInsets.bottom,
-        ),
-        child: _EditServiceForm(categorias: _categorias, item: s),
-      ),
-    );
-
-    // Tras cerrar (guardar/cancelar), recargar lista
-    _reload();
-  }
-
-  /// Eliminar servicio (HU006)
-  Future<void> _confirmDelete(ServiceItem s) async {
-    if (s.estado != "PENDIENTE") {
-      _snack("Solo los servicios PENDIENTES pueden eliminarse.");
-      return;
-    }
-
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text("Confirmar eliminación"),
-        content: Text(
-          '¿Eliminar el servicio "${s.titulo}"?\nEsta acción no se puede deshacer.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text("Cancelar"),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text("Eliminar"),
-          ),
-        ],
-      ),
-    );
-
-    if (ok == true) {
-      try {
-        await ApiService.deleteService(s.id);
-        _snack("Servicio eliminado ✅", success: true);
-        _reload();
-      } catch (e) {
-        _snack("Error al eliminar: $e");
-      }
-    }
-  }
-
-  void _snack(String msg, {bool success = false}) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: success ? _primary : Colors.red,
-      ),
-    );
-  }
-
-  Color _statusColor(String estado) {
-    switch (estado.toUpperCase()) {
-      case "PENDIENTE":
-        return Colors.orange;
-      case "EN_PROCESO":
-        return Colors.blue;
-      case "FINALIZADO":
-        return Colors.green;
-      case "CANCELADO":
-        return Colors.red;
-      default:
-        return Colors.grey;
-    }
-  }
-
-  Widget _buildProfileAvatar() {
-    final letter = _initialLetter();
-    return CircleAvatar(
-      radius: 18,
-      backgroundColor: _primary,
-      child: Text(
-        letter,
-        style: const TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.w700,
-        ),
-      ),
-    );
-  }
-
-  void _showComingSoon() {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Esta sección estará disponible próximamente.'),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
   }
 
   @override
@@ -539,234 +409,142 @@ class _ClientHomeState extends State<ClientHome>
       appBar: AppBar(
         elevation: 0,
         backgroundColor: Colors.white,
-        // Esquina superior izquierda: Publicar servicio (HU005)
         leading: IconButton(
           icon: const Icon(Icons.add_circle_outline, color: _primary),
           tooltip: 'Publicar servicio',
           onPressed: _openPublishForm,
         ),
-        title: const Text(
-          'Conecta2',
-          style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800),
-        ),
+        title: const Text('Conecta2', style: TextStyle(color: Colors.black, fontWeight: FontWeight.w800)),
         actions: [
           IconButton(
-            icon: const Icon(
-              Icons.notifications_outlined,
-              color: Colors.black87,
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.notifications_outlined, color: Colors.black87),
+                if (_offers.isNotEmpty)
+                  Positioned(
+                    right: -2, top: -2,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                      decoration: BoxDecoration(color: Colors.red, borderRadius: BorderRadius.circular(10)),
+                      child: Text(_offers.length.toString(), style: const TextStyle(color: Colors.white, fontSize: 10)),
+                    ),
+                  ),
+              ],
             ),
             tooltip: 'Notificaciones',
-            onPressed: _showComingSoon,
+            onPressed: _openNotifications,
           ),
           Padding(
             padding: const EdgeInsets.only(right: 14),
-            child: GestureDetector(
-              onTap: _showProfileMenu,
-              child: _buildProfileAvatar(),
-            ),
+            child: GestureDetector(onTap: _showProfileMenu, child: CircleAvatar(backgroundColor: _primary, child: Text((_currentName().isNotEmpty ? _currentName()[0] : '?').toUpperCase(), style: const TextStyle(color: Colors.white))))
           ),
         ],
       ),
-      body: Column(
-        children: [
-          if (_profileLoading) const LinearProgressIndicator(minHeight: 2),
-          if (_profile != null) _buildProfileCard(),
-          if (_profileError != null && _profile == null)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-              child: Material(
-                color: Colors.red.withOpacity(0.08),
-                borderRadius: BorderRadius.circular(12),
-                child: ListTile(
-                  leading: const Icon(Icons.error_outline, color: Colors.red),
-                  title: Text(
-                    '$_profileError',
-                    style: const TextStyle(color: Colors.red),
-                  ),
-                  trailing: IconButton(
-                    icon: const Icon(Icons.refresh, color: Colors.red),
-                    tooltip: 'Reintentar',
-                    onPressed: _clientId != null ? _refreshProfile : null,
-                  ),
-                ),
-              ),
-            ),
-          Container(
-            margin: const EdgeInsets.all(16),
-            child: TabBar(
-              controller: _tab,
-              indicator: BoxDecoration(
-                color: Colors.black87,
-                borderRadius: BorderRadius.circular(30),
-              ),
-              labelColor: Colors.white,
-              unselectedLabelColor: Colors.black87,
-              tabs: const [
-                Tab(text: 'Mis servicios'),
-                Tab(text: 'Ver mapa'),
-              ],
-            ),
-          ),
-          const SizedBox(height: 6),
-          Expanded(
-            child: TabBarView(
-              controller: _tab,
-              children: [
-                // AVAILABLE: lista de servicios publicados
-                _buildAvailable(),
-                // VIEW ON MAP: placeholder
-                const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.map_outlined, size: 64, color: Colors.black38),
-                      SizedBox(height: 8),
-                      Text(
-                        'Vista de Mapa en construcción🔧...',
-                        style: TextStyle(color: Colors.black54),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAvailable() {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (_error != null) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Text(
-            'Error cargando servicios:\n$_error',
-            textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.red),
-          ),
-        ),
-      );
-    }
-    if (_services.isEmpty) {
-      return const Center(
-        child: Text(
-          'Aún no hay servicios publicados',
-          style: TextStyle(color: Colors.black54),
-        ),
-      );
-    }
-
-    return RefreshIndicator(
-      onRefresh: _reload,
-      child: ListView.separated(
-        padding: const EdgeInsets.all(16),
-        itemBuilder: (context, i) {
-          final s = _services[i];
-          return Card(
-            elevation: 1.5,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: ListTile(
-              leading: CircleAvatar(
-                backgroundColor: _secondary.withOpacity(.15),
-                child: const Icon(
-                  Icons.home_repair_service_rounded,
-                  color: _primary,
-                ),
-              ),
-              title: Row(
+      body: RefreshIndicator(
+        onRefresh: _loadServices,
+        child: _loading
+            ? const Center(child: CircularProgressIndicator())
+            : ListView(
+                padding: const EdgeInsets.all(16),
                 children: [
-                  Expanded(
-                    child: Text(
-                      s.titulo,
-                      style: const TextStyle(fontWeight: FontWeight.w700),
-                    ),
-                  ),
-                  Chip(
-                    label: Text(s.estado),
-                    backgroundColor: _statusColor(s.estado).withOpacity(0.1),
-                    labelStyle: TextStyle(
-                      color: _statusColor(s.estado),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
+                  ...List.generate(_services.length, (i) {
+                    final s = _services[i];
+                    final titulo = (s['titulo'] ?? '').toString();
+                    final categoria = categoryDisplayLabel((s['categoria'] ?? '').toString());
+                    final ubicacion = (s['ubicacion'] ?? '').toString();
+                    final estado = (s['estado'] ?? 'PENDIENTE').toString();
+                    final int? serviceId = () {
+                      final v = s['id'];
+                      if (v == null) return null;
+                      if (v is int) return v;
+                      return int.tryParse(v.toString());
+                    }();
+                    return Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Card(
+                        color: const Color(0xFFF6F1FF),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            backgroundColor: const Color(0xFF7E57C2).withOpacity(0.12),
+                            child: const Icon(Icons.work_outline, color: Color(0xFF7E57C2)),
+                          ),
+                          title: Text(titulo.isEmpty ? 'Servicio' : titulo,
+                              style: const TextStyle(fontWeight: FontWeight.w700)),
+                          subtitle: Text([
+                            if (ubicacion.isNotEmpty) ubicacion,
+                            if (categoria.isNotEmpty) categoria,
+                            'Estado: $estado',
+                          ].join(' • ')),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              () {
+                                Color statusColor = Colors.orange;
+                                switch (estado.toUpperCase()) {
+                                  case 'ASIGNADO':
+                                  case 'EN_PROCESO':
+                                    statusColor = Colors.blue; break;
+                                  case 'FINALIZADO':
+                                    statusColor = Colors.green; break;
+                                  case 'CANCELADO':
+                                    statusColor = Colors.red; break;
+                                  default:
+                                    statusColor = Colors.orange; break;
+                                }
+                                return Chip(
+                                  label: Text(estado),
+                                  backgroundColor: statusColor.withOpacity(0.1),
+                                  labelStyle: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
+                                );
+                              }(),
+                              if (estado.toUpperCase() == 'PENDIENTE' && serviceId != null) ...[
+                                const SizedBox(width: 6),
+                                PopupMenuButton<String>(
+                                  tooltip: 'Opciones',
+                                  onSelected: (value) {
+                                    if (value == 'edit') {
+                                      _openEditForm(serviceId!, s);
+                                    } else if (value == 'delete') {
+                                      _confirmDelete(serviceId!);
+                                    }
+                                  },
+                                  itemBuilder: (context) => [
+                                    const PopupMenuItem(value: 'edit', child: ListTile(leading: Icon(Icons.edit_outlined), title: Text('Editar'))),
+                                    const PopupMenuItem(value: 'delete', child: ListTile(leading: Icon(Icons.delete_outline, color: Colors.red), title: Text('Eliminar'))),
+                                  ],
+                                ),
+                              ],
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  }),
+                  const SizedBox(height: 8),
+                  const Text('Ver mapa', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  const CurrentLocationMap(height: 260),
                 ],
               ),
-              subtitle: Text(
-                '${s.ubicacion} • ${categoryDisplayLabel(s.categoria)}\nFecha: ${_fmtDate(s.fechaEstimada)}',
-              ),
-              isThreeLine: true,
-              trailing: PopupMenuButton<String>(
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                onSelected: (value) {
-                  if (value == 'editar') {
-                    _openEditSheet(s);
-                  } else if (value == 'eliminar') {
-                    _confirmDelete(s);
-                  }
-                },
-                itemBuilder: (context) => [
-                  const PopupMenuItem(
-                    value: 'editar',
-                    child: ListTile(
-                      leading: Icon(Icons.edit, color: Colors.black87),
-                      title: Text('Editar'),
-                    ),
-                  ),
-                  const PopupMenuItem(
-                    value: 'eliminar',
-                    child: ListTile(
-                      leading: Icon(Icons.delete_outline, color: Colors.red),
-                      title: Text('Eliminar'),
-                    ),
-                  ),
-                ],
-              ),
-              onTap: () {
-                // Aquí podrías navegar a un detalle
-              },
-            ),
-          );
-        },
-        separatorBuilder: (_, __) => const SizedBox(height: 12),
-        itemCount: _services.length,
       ),
     );
   }
 }
 
-String _fmtDate(DateTime d) {
-  return '${d.day.toString().padLeft(2, '0')}/'
-      '${d.month.toString().padLeft(2, '0')}/'
-      '${d.year}';
-}
-
-/// ===============================
-/// FORMULARIO DE PUBLICACIÓN (HU005) -> hace POST al backend
-/// ===============================
 class _PublishServiceForm extends StatefulWidget {
   final List<String> categorias;
   const _PublishServiceForm({required this.categorias});
-
   @override
   State<_PublishServiceForm> createState() => _PublishServiceFormState();
 }
 
 class _PublishServiceFormState extends State<_PublishServiceForm> {
   final _formKey = GlobalKey<FormState>();
-
   final _tituloCtrl = TextEditingController();
   final _descripcionCtrl = TextEditingController();
   final _ubicacionCtrl = TextEditingController();
-
   String? _categoria;
   DateTime? _fecha;
   bool _sending = false;
@@ -781,10 +559,9 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
-    final initial = _fecha ?? now.add(const Duration(days: 1));
     final picked = await showDatePicker(
       context: context,
-      initialDate: initial,
+      initialDate: _fecha ?? now.add(const Duration(days: 1)),
       firstDate: DateTime(now.year, now.month, now.day),
       lastDate: DateTime(now.year + 2),
       helpText: 'Selecciona fecha estimada',
@@ -797,23 +574,17 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
 
   Future<void> _submit() async {
     if (_sending) return;
-
-    // Validaciones de UI
     if (!_formKey.currentState!.validate()) return;
-
-    // HU005: validación fecha >= hoy
     final today = DateTime.now();
     final todayAt0 = DateTime(today.year, today.month, today.day);
     if (_fecha == null || _fecha!.isBefore(todayAt0)) {
-      _snack('La fecha estimada no puede ser anterior al día actual.');
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('La fecha no puede ser anterior a hoy'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
       return;
     }
 
-    // Validación: categoría existe
     final categoriaValue = normalizeCategoryValue(_categoria);
-    if (categoriaValue.isEmpty ||
-        !widget.categorias.contains(categoriaValue)) {
-      _snack('La categoría seleccionada no es válida.');
+    if (categoriaValue.isEmpty || !widget.categorias.contains(categoriaValue)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Categoría inválida'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
       return;
     }
 
@@ -826,141 +597,70 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
         ubicacion: _ubicacionCtrl.text.trim(),
         fechaEstimada: _fecha!,
       );
-
-      // Convertimos respuesta a ServiceItem (por si backend devuelve el creado)
-      final created = ServiceItem.fromJson(resp);
-
       if (!mounted) return;
-      Navigator.of(context).pop(created);
+      Navigator.pop(context, resp);
     } catch (e) {
-      _snack('Error al publicar: $e');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al publicar: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
     } finally {
       if (mounted) setState(() => _sending = false);
     }
   }
 
-  void _snack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: Colors.red,
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-      ).copyWith(top: 16, bottom: 22),
+      padding: EdgeInsets.only(
+        left: 16, right: 16, top: 16, bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
       child: SingleChildScrollView(
         child: Form(
           key: _formKey,
           child: Column(
             children: [
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
+              Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8))),
               const SizedBox(height: 12),
-              const Text(
-                'Publicación de servicios',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-              ),
+              const Text('Publicación de servicios', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
 
-              // TÍTULO
               TextFormField(
                 controller: _tituloCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Título *',
-                  prefixIcon: Icon(Icons.title),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'El título no debe estar vacío'
-                    : null,
+                decoration: const InputDecoration(labelText: 'Título *', prefixIcon: Icon(Icons.title)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'El título no debe estar vacío' : null,
               ),
               const SizedBox(height: 12),
 
-              // DESCRIPCIÓN
               TextFormField(
                 controller: _descripcionCtrl,
-                minLines: 3,
-                maxLines: 6,
-                decoration: const InputDecoration(
-                  labelText: 'Descripción *',
-                  prefixIcon: Icon(Icons.description_outlined),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'La descripción no debe estar vacía'
-                    : null,
+                minLines: 3, maxLines: 6,
+                decoration: const InputDecoration(labelText: 'Descripción *', prefixIcon: Icon(Icons.description_outlined)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'La descripción no debe estar vacía' : null,
               ),
               const SizedBox(height: 12),
 
-              // CATEGORÍA
               DropdownButtonFormField<String>(
-                decoration: const InputDecoration(
-                  labelText: 'Categoría *',
-                  prefixIcon: Icon(Icons.category_outlined),
-                ),
+                decoration: const InputDecoration(labelText: 'Categoría *', prefixIcon: Icon(Icons.category_outlined)),
                 value: _categoria,
-                items: widget.categorias
-                    .map(
-                      (c) => DropdownMenuItem(
-                        value: c,
-                        child: Text(categoryDisplayLabel(c)),
-                      ),
-                    )
-                    .toList(),
+                items: widget.categorias.map((c) => DropdownMenuItem(value: c, child: Text(categoryDisplayLabel(c)))).toList(),
                 onChanged: (v) => setState(() => _categoria = v),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'Selecciona una categoría'
-                    : null,
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Selecciona una categoría' : null,
               ),
               const SizedBox(height: 12),
 
-              // UBICACIÓN
               TextFormField(
                 controller: _ubicacionCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Ubicación *',
-                  prefixIcon: Icon(Icons.location_on_outlined),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'La ubicación es obligatoria'
-                    : null,
+                decoration: const InputDecoration(labelText: 'Ubicación *', prefixIcon: Icon(Icons.location_on_outlined)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'La ubicación es obligatoria' : null,
               ),
               const SizedBox(height: 12),
 
-              // FECHA ESTIMADA
               InkWell(
                 onTap: _pickDate,
                 child: InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Fecha estimada *',
-                    prefixIcon: Icon(Icons.event_outlined),
-                    border: OutlineInputBorder(),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Fecha estimada *', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        _fecha == null
-                            ? 'Selecciona una fecha'
-                            : _fmtDate(_fecha!),
-                        style: TextStyle(
-                          color: _fecha == null
-                              ? Colors.black45
-                              : Colors.black87,
-                        ),
-                      ),
+                      Text(_fecha == null ? 'Selecciona una fecha' : _fmtDate(_fecha!)),
                       const Icon(Icons.calendar_today, size: 18),
                     ],
                   ),
@@ -968,45 +668,15 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
               ),
               const SizedBox(height: 18),
 
-              // BOTONES
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _sending ? null : () => Navigator.pop(context),
-                      child: const Text('Cancelar'),
-                    ),
-                  ),
+                  Expanded(child: OutlinedButton(onPressed: _sending ? null : () => Navigator.pop(context), child: const Text('Cancelar'))),
                   const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _primary,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: _sending ? null : _submit,
-                      child: _sending
-                          ? const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text('Publicar'),
-                    ),
-                  ),
+                  Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white), onPressed: _sending ? null : _submit, child: _sending ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Guardar'))),
                 ],
               ),
               const SizedBox(height: 4),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '* Campos obligatorios',
-                  style: TextStyle(fontSize: 12, color: Colors.black54),
-                ),
-              ),
+              const Align(alignment: Alignment.centerLeft, child: Text('* Campos obligatorios', style: TextStyle(fontSize: 12, color: Colors.black54))),
             ],
           ),
         ),
@@ -1015,39 +685,39 @@ class _PublishServiceFormState extends State<_PublishServiceForm> {
   }
 }
 
-/// ===============================
-/// FORMULARIO DE EDICIÓN (HU006) -> hace PUT al backend
-/// ===============================
+String _fmtDate(DateTime d) {
+  return '${d.day.toString().padLeft(2, '0')}/${d.month.toString().padLeft(2, '0')}/${d.year}';
+}
+
 class _EditServiceForm extends StatefulWidget {
+  final int serviceId;
   final List<String> categorias;
-  final ServiceItem item;
-
-  const _EditServiceForm({required this.categorias, required this.item});
-
+  final Map<String, dynamic> initial;
+  const _EditServiceForm({required this.serviceId, required this.categorias, required this.initial});
   @override
   State<_EditServiceForm> createState() => _EditServiceFormState();
 }
 
 class _EditServiceFormState extends State<_EditServiceForm> {
   final _formKey = GlobalKey<FormState>();
-
   late final TextEditingController _tituloCtrl;
   late final TextEditingController _descripcionCtrl;
   late final TextEditingController _ubicacionCtrl;
-
   String? _categoria;
   DateTime? _fecha;
-  bool _sending = false;
+  bool _saving = false;
 
   @override
   void initState() {
     super.initState();
-    _tituloCtrl = TextEditingController(text: widget.item.titulo);
-    _descripcionCtrl = TextEditingController(text: widget.item.descripcion);
-    _ubicacionCtrl = TextEditingController(text: widget.item.ubicacion);
-    final normalized = normalizeCategoryValue(widget.item.categoria);
-    _categoria = widget.categorias.contains(normalized) ? normalized : null;
-    _fecha = widget.item.fechaEstimada;
+    final init = widget.initial;
+    _tituloCtrl = TextEditingController(text: (init['titulo'] ?? '').toString());
+    _descripcionCtrl = TextEditingController(text: (init['descripcion'] ?? '').toString());
+    _ubicacionCtrl = TextEditingController(text: (init['ubicacion'] ?? '').toString());
+    final rawCat = normalizeCategoryValue((init['categoria'] ?? '').toString());
+    _categoria = widget.categorias.contains(rawCat) ? rawCat : null;
+    final fechaRaw = (init['fechaEstimada'] ?? init['fecha'] ?? '').toString();
+    try { _fecha = DateTime.tryParse(fechaRaw); } catch (_) {}
   }
 
   @override
@@ -1060,10 +730,9 @@ class _EditServiceFormState extends State<_EditServiceForm> {
 
   Future<void> _pickDate() async {
     final now = DateTime.now();
-    final initial = _fecha ?? now.add(const Duration(days: 1));
     final picked = await showDatePicker(
       context: context,
-      initialDate: initial.isBefore(now) ? now : initial,
+      initialDate: _fecha ?? now.add(const Duration(days: 1)),
       firstDate: DateTime(now.year, now.month, now.day),
       lastDate: DateTime(now.year + 2),
       helpText: 'Selecciona fecha estimada',
@@ -1075,173 +744,93 @@ class _EditServiceFormState extends State<_EditServiceForm> {
   }
 
   Future<void> _submit() async {
-    if (_sending) return;
-
+    if (_saving) return;
     if (!_formKey.currentState!.validate()) return;
-
     final today = DateTime.now();
     final todayAt0 = DateTime(today.year, today.month, today.day);
     if (_fecha == null || _fecha!.isBefore(todayAt0)) {
-      _snack('La fecha estimada no puede ser anterior al día actual.');
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('La fecha no puede ser anterior a hoy'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
       return;
     }
 
     final categoriaValue = normalizeCategoryValue(_categoria);
-    if (categoriaValue.isEmpty ||
-        !widget.categorias.contains(categoriaValue)) {
-      _snack('La categoría seleccionada no es válida.');
+    if (categoriaValue.isEmpty || !widget.categorias.contains(categoriaValue)) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Categoría inválida'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
       return;
     }
 
-    setState(() => _sending = true);
+    setState(() => _saving = true);
     try {
-      await ApiService.updateService(
-        id: widget.item.id,
+      final resp = await ApiService.updateService(
+        id: widget.serviceId,
         titulo: _tituloCtrl.text.trim(),
         descripcion: _descripcionCtrl.text.trim(),
         categoria: categoriaValue,
         ubicacion: _ubicacionCtrl.text.trim(),
         fechaEstimada: _fecha!,
       );
-
       if (!mounted) return;
-      Navigator.of(context).pop(); // cerramos la hoja
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('✅ Servicio actualizado'),
-          behavior: SnackBarBehavior.floating,
-          backgroundColor: _primary,
-        ),
-      );
+      Navigator.pop(context, resp);
     } catch (e) {
-      _snack('Error al actualizar: $e');
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error al guardar: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red));
     } finally {
-      if (mounted) setState(() => _sending = false);
+      if (mounted) setState(() => _saving = false);
     }
-  }
-
-  void _snack(String msg) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(msg),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: Colors.red,
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-      ).copyWith(top: 16, bottom: 22),
+      padding: EdgeInsets.only(left: 16, right: 16, top: 16, bottom: MediaQuery.of(context).viewInsets.bottom + 16),
       child: SingleChildScrollView(
         child: Form(
           key: _formKey,
           child: Column(
             children: [
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.black26,
-                  borderRadius: BorderRadius.circular(8),
-                ),
-              ),
+              Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black26, borderRadius: BorderRadius.circular(8))),
               const SizedBox(height: 12),
-              const Text(
-                'Editar servicio',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
-              ),
+              const Text('Editar servicio', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
               const SizedBox(height: 16),
 
-              // TÍTULO
               TextFormField(
                 controller: _tituloCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Título *',
-                  prefixIcon: Icon(Icons.title),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'El título no debe estar vacío'
-                    : null,
+                decoration: const InputDecoration(labelText: 'Título *', prefixIcon: Icon(Icons.title)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'El título no debe estar vacío' : null,
               ),
               const SizedBox(height: 12),
 
-              // DESCRIPCIÓN
               TextFormField(
                 controller: _descripcionCtrl,
-                minLines: 3,
-                maxLines: 6,
-                decoration: const InputDecoration(
-                  labelText: 'Descripción *',
-                  prefixIcon: Icon(Icons.description_outlined),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'La descripción no debe estar vacía'
-                    : null,
+                minLines: 3, maxLines: 6,
+                decoration: const InputDecoration(labelText: 'Descripción *', prefixIcon: Icon(Icons.description_outlined)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'La descripción no debe estar vacía' : null,
               ),
               const SizedBox(height: 12),
 
-              // CATEGORÍA
               DropdownButtonFormField<String>(
-                decoration: const InputDecoration(
-                  labelText: 'Categoría *',
-                  prefixIcon: Icon(Icons.category_outlined),
-                ),
+                decoration: const InputDecoration(labelText: 'Categoría *', prefixIcon: Icon(Icons.category_outlined)),
                 value: _categoria,
-                items: widget.categorias
-                    .map(
-                      (c) => DropdownMenuItem(
-                        value: c,
-                        child: Text(categoryDisplayLabel(c)),
-                      ),
-                    )
-                    .toList(),
+                items: widget.categorias.map((c) => DropdownMenuItem(value: c, child: Text(categoryDisplayLabel(c)))).toList(),
                 onChanged: (v) => setState(() => _categoria = v),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'Selecciona una categoría'
-                    : null,
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Selecciona una categoría' : null,
               ),
               const SizedBox(height: 12),
 
-              // UBICACIÓN
               TextFormField(
                 controller: _ubicacionCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Ubicación *',
-                  prefixIcon: Icon(Icons.location_on_outlined),
-                ),
-                validator: (v) => (v == null || v.trim().isEmpty)
-                    ? 'La ubicación es obligatoria'
-                    : null,
+                decoration: const InputDecoration(labelText: 'Ubicación *', prefixIcon: Icon(Icons.location_on_outlined)),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'La ubicación es obligatoria' : null,
               ),
               const SizedBox(height: 12),
 
-              // FECHA ESTIMADA
               InkWell(
                 onTap: _pickDate,
                 child: InputDecorator(
-                  decoration: const InputDecoration(
-                    labelText: 'Fecha estimada *',
-                    prefixIcon: Icon(Icons.event_outlined),
-                    border: OutlineInputBorder(),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Fecha estimada *', prefixIcon: Icon(Icons.event_outlined), border: OutlineInputBorder()),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        _fecha == null
-                            ? 'Selecciona una fecha'
-                            : _fmtDate(_fecha!),
-                        style: TextStyle(
-                          color: _fecha == null
-                              ? Colors.black45
-                              : Colors.black87,
-                        ),
-                      ),
+                      Text(_fecha == null ? 'Selecciona una fecha' : _fmtDate(_fecha!)),
                       const Icon(Icons.calendar_today, size: 18),
                     ],
                   ),
@@ -1249,44 +838,12 @@ class _EditServiceFormState extends State<_EditServiceForm> {
               ),
               const SizedBox(height: 18),
 
-              // BOTONES
               Row(
                 children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: _sending ? null : () => Navigator.pop(context),
-                      child: const Text('Cancelar'),
-                    ),
-                  ),
+                  Expanded(child: OutlinedButton(onPressed: _saving ? null : () => Navigator.pop(context), child: const Text('Cancelar'))),
                   const SizedBox(width: 12),
-                  Expanded(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _primary,
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: _sending ? null : _submit,
-                      child: _sending
-                          ? const SizedBox(
-                              height: 18,
-                              width: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                color: Colors.white,
-                              ),
-                            )
-                          : const Text('Guardar'),
-                    ),
-                  ),
+                  Expanded(child: ElevatedButton(style: ElevatedButton.styleFrom(backgroundColor: _primary, foregroundColor: Colors.white), onPressed: _saving ? null : _submit, child: _saving ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)) : const Text('Guardar'))),
                 ],
-              ),
-              const SizedBox(height: 4),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  '* Campos obligatorios',
-                  style: TextStyle(fontSize: 12, color: Colors.black54),
-                ),
               ),
             ],
           ),

@@ -8,7 +8,7 @@ class ApiService {
   // ==========================
   static String host = kIsWeb
       ? "http://localhost:8080"
-      : "http://10.0.2.2:8080";
+      : "http://localhost:8080";
 
   static String get _apiPrefix => "/api/v1";
   static Uri _u(String path, {Map<String, String>? query}) =>
@@ -21,17 +21,31 @@ class ApiService {
   // ==========================
   // JWT EN MEMORIA
   // ==========================
-  static String? _jwt;
-  static String? get token => _jwt;
-  static void setToken(String? t) => _jwt = t;
-  static void clearToken() => _jwt = null;
+  static String? _jwtWorker;
+  static String? _jwtClient;
+  static String? get workerToken => _jwtWorker;
+  static String? get clientToken => _jwtClient;
+  static void setWorkerToken(String? t) => _jwtWorker = t;
+  static void setClientToken(String? t) => _jwtClient = t;
+  static void clearToken() { _jwtWorker = null; _jwtClient = null; }
 
   // ==========================
   // HEADERS
   // ==========================
-  static Map<String, String> _jsonHeaders({bool auth = false}) {
+  static Map<String, String> _jsonHeaders({bool auth = false, String? role}) {
     final h = <String, String>{"Content-Type": "application/json"};
-    if (auth && _jwt != null) h["Authorization"] = "Bearer $_jwt";
+    if (auth) {
+      String? token;
+      if (role == 'worker') {
+        token = _jwtWorker;
+      } else if (role == 'client') {
+        token = _jwtClient;
+      } else {
+        // fallback por compatibilidad; intenta cliente y luego trabajador
+        token = _jwtClient ?? _jwtWorker;
+      }
+      if (token != null) h["Authorization"] = "Bearer $token";
+    }
     return h;
   }
 
@@ -67,7 +81,7 @@ class ApiService {
     required String correo,
     required String contrasena,
   }) async {
-    clearToken();
+    // No limpiar tokens del otro rol; permite sesiones separadas
     final res = await http
         .post(
           _u("/auth/login"),
@@ -77,7 +91,7 @@ class ApiService {
         .timeout(const Duration(seconds: 15));
 
     final data = _processResponse(res, "login de trabajador");
-    if (data["token"] is String) setToken(data["token"]);
+    if (data["token"] is String) setWorkerToken(data["token"]);
     return data;
   }
 
@@ -112,7 +126,7 @@ class ApiService {
     final res = await http
         .get(
           _absolute("/api/Trabajadores/$id"),
-          headers: _jsonHeaders(auth: true),
+          headers: _jsonHeaders(auth: true, role: 'worker'),
         )
         .timeout(const Duration(seconds: 15));
 
@@ -166,7 +180,7 @@ class ApiService {
     final res = await http
         .put(
           _absolute("/api/Trabajadores/$id"),
-          headers: _jsonHeaders(auth: true),
+          headers: _jsonHeaders(auth: true, role: 'worker'),
           body: jsonEncode(payload),
         )
         .timeout(const Duration(seconds: 15));
@@ -204,7 +218,7 @@ class ApiService {
     required String correo,
     required String contrasena,
   }) async {
-    clearToken();
+    // No limpiar tokens del otro rol; permite sesiones separadas
     final res = await http
         .post(
           _u("/auth/clients/login"),
@@ -214,7 +228,7 @@ class ApiService {
         .timeout(const Duration(seconds: 15));
 
     final data = _processResponse(res, "login de cliente");
-    if (data["token"] is String) setToken(data["token"]);
+    if (data["token"] is String) setClientToken(data["token"]);
     return data;
   }
 
@@ -236,7 +250,7 @@ class ApiService {
 
   static Future<Map<String, dynamic>> fetchClientById(int id) async {
     final res = await http
-        .get(_absolute("/api/Clientes/$id"), headers: _jsonHeaders(auth: true))
+        .get(_absolute("/api/Clientes/$id"), headers: _jsonHeaders(auth: true, role: 'client'))
         .timeout(const Duration(seconds: 15));
 
     if (res.statusCode == 200) {
@@ -287,7 +301,7 @@ class ApiService {
     final res = await http
         .put(
           _absolute("/api/Clientes/$id"),
-          headers: _jsonHeaders(auth: true),
+          headers: _jsonHeaders(auth: true, role: 'client'),
           body: jsonEncode(payload),
         )
         .timeout(const Duration(seconds: 15));
@@ -301,7 +315,7 @@ class ApiService {
   /// GET /api/v1/clients/services/public/available (pública)
   static Future<List<Map<String, dynamic>>> getServices() async {
     final res = await http
-        .get(_u("/clients/services"), headers: _jsonHeaders(auth: true))
+        .get(_u("/clients/services"), headers: _jsonHeaders(auth: true, role: 'client'))
         .timeout(const Duration(seconds: 15));
 
     if (res.statusCode == 200) {
@@ -324,6 +338,136 @@ class ApiService {
     throw Exception(
       "Error listando servicios (${res.statusCode}): ${res.body}",
     );
+  }
+
+  /// Lista de servicios publicados disponibles para todos (público).
+  /// Opcionalmente se puede filtrar por `categoria` (ENUM del backend).
+  static Future<List<Map<String, dynamic>>> getPublicAvailableServices({
+    String? categoria,
+  }) async {
+    final query = <String, String>{};
+    if (categoria != null && categoria.trim().isNotEmpty) {
+      query['categoria'] = categoria.trim();
+    }
+
+    final res = await http
+        .get(
+          _u("/clients/services/public/available", query: query.isEmpty ? null : query),
+          headers: _jsonHeaders(),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode == 200) {
+      final decoded = jsonDecode(res.body);
+      if (decoded is List) return decoded.cast<Map<String, dynamic>>();
+      if (decoded is Map && decoded['content'] is List) {
+        return (decoded['content'] as List).cast<Map<String, dynamic>>();
+      }
+      return [];
+    }
+
+    throw Exception(
+      "Error listando servicios públicos (${res.statusCode}): ${res.body}",
+    );
+  }
+
+  // ==========================
+  // OFERTAS (Trabajador <-> Cliente)
+  // ==========================
+
+  /// Crea una oferta de un trabajador para un servicio publicado.
+  /// Endpoint sugerido: POST /api/v1/workers/services/{serviceId}/offers
+  static Future<Map<String, dynamic>> createOffer({
+    required int serviceId,
+    required int workerId,
+    required double precio,
+    String? mensaje,
+  }) async {
+    final res = await http
+        .post(
+          _u("/workers/services/$serviceId/offers"),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+          body: jsonEncode({
+            "workerId": workerId,
+            // Backend espera 'monto'. Si tu backend usa 'precio', avísame para revertir.
+            "monto": precio,
+            if (mensaje != null && mensaje.trim().isNotEmpty) "mensaje": mensaje,
+          }),
+        )
+        .timeout(const Duration(seconds: 15));
+    return _processResponse(res, "crear oferta");
+  }
+
+  /// Lista ofertas pendientes para un cliente (notificaciones).
+  /// Endpoint sugerido: GET /api/v1/clients/{clientId}/offers/pending
+  static Future<List<Map<String, dynamic>>> getClientPendingOffers(
+      int clientId) async {
+    final res = await http
+        .get(
+          _u("/clients/$clientId/offers/pending"),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode == 200) {
+      final decoded = jsonDecode(res.body);
+      if (decoded is List) return decoded.cast<Map<String, dynamic>>();
+      if (decoded is Map && decoded['content'] is List) {
+        return (decoded['content'] as List).cast<Map<String, dynamic>>();
+      }
+      return [];
+    }
+    throw Exception(
+      "Error obteniendo ofertas (${res.statusCode}): ${res.body}",
+    );
+  }
+
+  /// Lista ofertas pendientes para un trabajador (p. ej. contraofertas).
+  /// Endpoint sugerido: GET /api/v1/workers/{workerId}/offers/pending
+  static Future<List<Map<String, dynamic>>> getWorkerPendingOffers(
+      int workerId) async {
+    final res = await http
+        .get(
+          _u("/workers/$workerId/offers/pending"),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode == 200) {
+      final decoded = jsonDecode(res.body);
+      if (decoded is List) return decoded.cast<Map<String, dynamic>>();
+      if (decoded is Map && decoded['content'] is List) {
+        return (decoded['content'] as List).cast<Map<String, dynamic>>();
+      }
+      return [];
+    }
+    throw Exception(
+      "Error obteniendo ofertas (${res.statusCode}): ${res.body}",
+    );
+  }
+
+  /// Responder a una oferta: ACCEPT | REJECT | COUNTER (con nuevo precio opcional)
+  /// Endpoint sugerido: POST /api/v1/offers/{offerId}/respond
+  static Future<Map<String, dynamic>> respondOffer({
+    required int offerId,
+    required String action, // ACCEPT | REJECT | COUNTER
+    double? precio,
+    String? mensaje,
+  }) async {
+    final body = <String, dynamic>{
+      "action": action.toUpperCase(),
+      if (precio != null) "precio": precio,
+      if (mensaje != null && mensaje.trim().isNotEmpty) "mensaje": mensaje,
+    };
+
+    final res = await http
+        .post(
+          _u("/offers/$offerId/respond"),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 15));
+    return _processResponse(res, "respuesta de oferta");
   }
 
   static Future<List<Map<String, dynamic>>> getServicesByClientPublic(
@@ -369,7 +513,7 @@ class ApiService {
     final res = await http
         .post(
           _u("/clients/services"),
-          headers: _jsonHeaders(auth: true),
+          headers: _jsonHeaders(auth: true, role: 'client'),
           body: body,
         )
         .timeout(const Duration(seconds: 15));
@@ -406,7 +550,7 @@ class ApiService {
     final res = await http
         .put(
           _u("/clients/services/$id"),
-          headers: _jsonHeaders(auth: true),
+          headers: _jsonHeaders(auth: true, role: 'client'),
           body: body,
         )
         .timeout(const Duration(seconds: 15));
@@ -428,7 +572,7 @@ class ApiService {
   /// DELETE /api/v1/clients/services/{id}  (privada)
   static Future<void> deleteService(int id) async {
     final res = await http
-        .delete(_u("/clients/services/$id"), headers: _jsonHeaders(auth: true))
+        .delete(_u("/clients/services/$id"), headers: _jsonHeaders(auth: true, role: 'client'))
         .timeout(const Duration(seconds: 15));
 
     if (res.statusCode == 204 || res.statusCode == 200) {
@@ -484,3 +628,5 @@ class ApiService {
     return fallback;
   }
 }
+
+
