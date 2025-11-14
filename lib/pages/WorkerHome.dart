@@ -134,6 +134,7 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
       case 'PENDIENTE':
         return 'Pendiente';
       case 'ASIGNADO':
+        return 'Asignado';
       case 'EN_PROCESO':
       case 'EN_CURSO':
         return 'En curso';
@@ -336,6 +337,29 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
         _incomingOffers = list;
         _inOffersLoading = false;
       });
+
+      // Si alguna oferta aparece como ACEPTADA por el cliente,
+      // marcar el servicio correspondiente como ASIGNADO solo para este trabajador.
+      for (final o in list) {
+        final estado = (o['estadoNegociacion'] ?? o['estado'] ?? '').toString().toUpperCase();
+        if (estado == 'ACEPTADA') {
+          final sid = _serviceIdFromOffer(o);
+          if (sid != null) {
+            setState(() {
+              _opportunities = _opportunities.map((svc) {
+                final id = _asInt(svc['id']);
+                if (id != null && id == sid) {
+                  final updated = Map<String, dynamic>.from(svc);
+                  updated['estado'] = 'ASIGNADO';
+                  updated['estadoServicio'] = 'ASIGNADO';
+                  return updated;
+                }
+                return svc;
+              }).toList();
+            });
+          }
+        }
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {

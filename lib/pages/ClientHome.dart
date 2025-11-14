@@ -29,6 +29,8 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   List<Map<String, dynamic>> _expiredServices = [];
   bool _loading = false;
   String? _error;
+  final Set<int> _expiryWarningIds = {};
+  final Set<int> _autoDeletedServiceIds = {};
 
   // Ofertas in-app
   List<Map<String, dynamic>> _offers = [];
@@ -148,6 +150,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       case 'PENDIENTE':
         return 'Pendiente';
       case 'ASIGNADO':
+        return 'Asignado';
       case 'EN_PROCESO':
       case 'EN_CURSO':
         return 'En curso';
@@ -178,6 +181,97 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     final nested = offer['service'] ?? offer['servicio'];
     if (nested is Map) return _asInt(nested['id']);
     return null;
+  }
+
+  int? _serviceIdFromService(Map<String, dynamic> service) {
+    final v = service['id'];
+    if (v is int) return v;
+    if (v == null) return null;
+    final asString = v.toString();
+    return int.tryParse(asString);
+  }
+
+  DateTime? _serviceDateFromService(Map<String, dynamic> service) {
+    final raw = (service['fechaEstimada'] ?? service['fecha'] ?? service['fechaServicio'] ?? '').toString();
+    if (raw.isEmpty) return null;
+    final parsed = DateTime.tryParse(raw);
+    if (parsed != null) return parsed;
+    final milliseconds = int.tryParse(raw);
+    if (milliseconds != null) return DateTime.fromMillisecondsSinceEpoch(milliseconds);
+    final asDouble = double.tryParse(raw);
+    if (asDouble != null) return DateTime.fromMillisecondsSinceEpoch(asDouble.toInt());
+    return null;
+  }
+
+  String _serviceStateUpper(Map<String, dynamic> service) {
+    final raw = (service['estado'] ?? service['estadoServicio'] ?? service['status'] ?? '').toString();
+    return raw.toUpperCase();
+  }
+
+  bool _isPendingState(String stateUpper) {
+    return stateUpper.isEmpty || stateUpper == 'PENDIENTE';
+  }
+
+  String _serviceTitle(Map<String, dynamic> service) {
+    final raw = (service['titulo'] ?? service['nombre'] ?? service['tituloServicio'] ?? '').toString();
+    if (raw.isNotEmpty) return raw;
+    return 'Servicio';
+  }
+
+  void _showClientNotification(String message, {Color background = _primary}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: background,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _evaluateServiceExpiration(Map<String, dynamic> service) async {
+    final serviceId = _serviceIdFromService(service);
+    if (serviceId == null) return;
+    final stateUpper = _serviceStateUpper(service);
+    if (!_isPendingState(stateUpper)) return;
+    final serviceDate = _serviceDateFromService(service);
+    if (serviceDate == null) return;
+    final today = DateTime.now();
+    final todayDay = DateTime(today.year, today.month, today.day);
+    final targetDay = DateTime(serviceDate.year, serviceDate.month, serviceDate.day);
+
+    if (targetDay == todayDay) {
+      if (!_expiryWarningIds.add(serviceId)) return;
+      final title = _serviceTitle(service);
+      _showClientNotification(
+        'Atención: el servicio "$title" vence hoy y será eliminado automáticamente a las 00:00 si sigue pendiente.',
+        background: Colors.orange,
+      );
+      return;
+    }
+
+    if (targetDay.isBefore(todayDay)) {
+      if (_autoDeletedServiceIds.contains(serviceId)) return;
+      _autoDeletedServiceIds.add(serviceId);
+      final title = _serviceTitle(service);
+      try {
+        final result = await ApiService.deleteService(serviceId);
+        if (!mounted) return;
+        setState(() {
+          _services.removeWhere((s) {
+            final id = _serviceIdFromService(s);
+            return id != null && id == serviceId;
+          });
+        });
+        final message = (result['mensaje'] ?? result['message'])?.toString() ??
+            'El servicio "$title" fue eliminado automáticamente tras superar la fecha (${_fmtDate(targetDay)}).';
+        _showClientNotification(message, background: Colors.red);
+      } catch (e) {
+        if (!mounted) return;
+        _autoDeletedServiceIds.remove(serviceId);
+        _showClientNotification('No fue posible eliminar "$title": $e', background: Colors.red);
+      }
+    }
   }
 
   void _updateLocalServiceState(int? serviceId, String newState) {
@@ -265,6 +359,9 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
         _expiredServices = expired;
         _loading = false;
       });
+      for (final service in _services) {
+        _evaluateServiceExpiration(service);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -308,9 +405,20 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       final list = await ApiService.getClientPendingOffers(id);
       if (!mounted) return;
       setState(() { _offers = list; _offersLoading = false; });
+      _processAcceptedOffers(list);
     } catch (e) {
       if (!mounted) return;
       setState(() { _offersError = e.toString().replaceFirst('Exception: ', ''); _offersLoading = false; });
+    }
+  }
+
+  void _processAcceptedOffers(List<Map<String, dynamic>> offers) {
+    for (final offer in offers) {
+      final estadoRaw = (offer['estadoNegociacion'] ?? offer['estado'] ?? '').toString().toUpperCase();
+      if (estadoRaw == 'ACEPTADA') {
+        final serviceId = _serviceIdFromOffer(offer);
+        if (serviceId != null) _updateLocalServiceState(serviceId, 'ASIGNADO');
+      }
     }
   }
 
@@ -336,7 +444,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
             try {
               await ApiService.clientRespondOffer(offerId: id, action: 'ACCEPT');
               removeLocal(id);
-              if (mounted) _updateLocalServiceState(serviceId, 'EN_PROCESO');
+              if (mounted) _updateLocalServiceState(serviceId, 'ASIGNADO');
               await _loadServices();
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(

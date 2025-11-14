@@ -481,10 +481,11 @@ class ApiService {
       query['categoria'] = categoria.trim();
     }
 
+    final bool hasWorkerAuth = _jwtWorker != null && _jwtWorker!.isNotEmpty;
     final res = await http
         .get(
           _u("/clients/services/public/available", query: query.isEmpty ? null : query),
-          headers: _jsonHeaders(),
+          headers: hasWorkerAuth ? _jsonHeaders(auth: true, role: 'worker') : _jsonHeaders(),
         )
         .timeout(const Duration(seconds: 15));
 
