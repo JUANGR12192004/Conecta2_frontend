@@ -228,6 +228,7 @@ class ApiService {
     String? areaServicio,
     String? contrasena,
     String? confirmarContrasena,
+    String? contrasenaActual,
   }) async {
     final payload = <String, dynamic>{
       if (nombreCompleto != null) "nombreCompleto": nombreCompleto,
@@ -246,6 +247,10 @@ class ApiService {
           "Debes ingresar la nueva contraseña y su confirmación.",
         );
       }
+      if (contrasenaActual == null || contrasenaActual.isEmpty) {
+        throw Exception("Debes ingresar tu contraseña actual.");
+      }
+      payload["contrasenaActual"] = contrasenaActual;
       payload["contrasena"] = contrasena;
       payload["confirmarContrasena"] = confirmarContrasena;
     }
@@ -358,13 +363,13 @@ class ApiService {
 
     Exception? firstError;
     try {
-      return await attempt(_absolute("/api/Clientes/$id"));
+      return await attempt(_u("/clients/$id"));
     } catch (e) {
       firstError = e is Exception ? e : Exception(e.toString());
     }
 
     try {
-      return await attempt(_u("/clients/$id"));
+      return await attempt(_absolute("/api/Clientes/$id"));
     } catch (e) {
       final secondError = e is Exception ? e : Exception(e.toString());
       throw firstError ?? secondError;
@@ -378,6 +383,7 @@ class ApiService {
     String? celular,
     String? contrasena,
     String? confirmarContrasena,
+    String? contrasenaActual,
   }) async {
     final payload = <String, dynamic>{
       if (nombreCompleto != null) "nombreCompleto": nombreCompleto,
@@ -395,6 +401,10 @@ class ApiService {
           "Debes ingresar la nueva contraseña y su confirmación.",
         );
       }
+      if (contrasenaActual == null || contrasenaActual.isEmpty) {
+        throw Exception("Debes ingresar tu contraseña actual.");
+      }
+      payload["contrasenaActual"] = contrasenaActual;
       payload["contrasena"] = contrasena;
       payload["confirmarContrasena"] = confirmarContrasena;
     }
@@ -403,14 +413,30 @@ class ApiService {
       throw Exception("No hay cambios para actualizar.");
     }
 
-    final res = await http
-        .put(
-          _absolute("/api/Clientes/$id"),
-          headers: _jsonHeaders(auth: true, role: 'client'),
-          body: jsonEncode(payload),
-        )
-        .timeout(const Duration(seconds: 15));
-    return _processResponse(res, "actualización de cliente");
+    Future<Map<String, dynamic>> attempt(Uri uri) async {
+      final res = await http
+          .put(
+            uri,
+            headers: _jsonHeaders(auth: true, role: 'client'),
+            body: jsonEncode(payload),
+          )
+          .timeout(const Duration(seconds: 15));
+      return _processResponse(res, "actualización de cliente");
+    }
+
+    Exception? firstError;
+    try {
+      return await attempt(_u("/clients/$id"));
+    } catch (e) {
+      firstError = e is Exception ? e : Exception(e.toString());
+    }
+
+    try {
+      return await attempt(_absolute("/api/Clientes/$id"));
+    } catch (e) {
+      final fallbackError = e is Exception ? e : Exception(e.toString());
+      throw firstError ?? fallbackError;
+    }
   }
 
   // ==========================

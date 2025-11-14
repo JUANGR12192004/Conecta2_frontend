@@ -29,6 +29,7 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
   List<Map<String, dynamic>> _opportunities = [];
   bool _opLoading = false;
   String? _opError;
+  int _hiddenExpiredOpportunities = 0;
   // Notificaciones para trabajador (contraofertas/aceptaciones)
   List<Map<String, dynamic>> _incomingOffers = [];
   bool _inOffersLoading = false;
@@ -139,7 +140,7 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
       case 'FINALIZADO':
         return 'Finalizado';
       case 'CANCELADO':
-        return 'Cancelado';
+        return 'Expirado';
       default:
         return value[0].toUpperCase() + value.substring(1).toLowerCase();
     }
@@ -172,6 +173,31 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
     final source = _currentName().isNotEmpty ? _currentName() : _currentEmail();
     if (source.isEmpty) return '?';
     return source.trim().substring(0, 1).toUpperCase();
+  }
+
+  DateTime? _parseServiceDate(dynamic raw) {
+    if (raw == null) return null;
+    final text = raw.toString().trim();
+    if (text.isEmpty) return null;
+    try {
+      final parsed = DateTime.parse(text);
+      return parsed.isUtc ? parsed.toLocal() : parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isDateExpired(DateTime? date) {
+    if (date == null) return false;
+    final cutoff = DateTime(date.year, date.month, date.day, 23, 59, 59);
+    return DateTime.now().isAfter(cutoff);
+  }
+
+  bool _shouldHideService(Map<String, dynamic> service) {
+    final estadoRaw = (service['estado'] ?? service['estadoServicio'] ?? service['status'] ?? '').toString();
+    if (estadoRaw.toUpperCase() == 'CANCELADO') return true;
+    final date = _parseServiceDate(service['fechaEstimada'] ?? service['fecha']);
+    return _isDateExpired(date);
   }
 
   @override
@@ -254,6 +280,7 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
         setState(() {
           _opportunities = [];
           _opError = null;
+          _hiddenExpiredOpportunities = 0;
         });
       }
       return;
@@ -269,15 +296,26 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
     try {
       final list = await ApiService.getPublicAvailableServices(categoria: categoria);
       if (!mounted) return;
+      int expiredCount = 0;
+      final filtered = <Map<String, dynamic>>[];
+      for (final svc in list) {
+        if (_shouldHideService(svc)) {
+          expiredCount++;
+          continue;
+        }
+        filtered.add(svc);
+      }
       setState(() {
-        _opportunities = list;
+        _opportunities = filtered;
         _opLoading = false;
+        _hiddenExpiredOpportunities = expiredCount;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _opError = e.toString().replaceFirst('Exception: ', '');
         _opLoading = false;
+        _hiddenExpiredOpportunities = 0;
       });
     }
   }
@@ -996,6 +1034,19 @@ if (_opError != null) {
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
             ),
             const SizedBox(height: 8),
+            if (_hiddenExpiredOpportunities > 0)
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  'Se ocultaron $_hiddenExpiredOpportunities solicitudes vencidas.',
+                  style: const TextStyle(color: Colors.orange),
+                ),
+              ),
             if (_opportunities.isEmpty)
               const Text(
                 'No hay oportunidades disponibles en tu área por ahora.',
@@ -1020,9 +1071,8 @@ if (_opError != null) {
                   final negotiationLabel = negotiationRaw.isEmpty ? '' : _negotiationStateLabel(negotiationRaw);
                   final negotiationOpen = negotiationUpper == 'EN_NEGOCIACION';
                   final bool canOffer = estadoUpper == 'PENDIENTE' && !negotiationOpen;
-                  final fechaRaw = (s['fechaEstimada'] ?? s['fecha'] ?? '').toString();
-                  DateTime? fecha;
-                  try { fecha = DateTime.tryParse(fechaRaw); } catch (_) {}
+                  final fechaRaw = s['fechaEstimada'] ?? s['fecha'];
+                  final fecha = _parseServiceDate(fechaRaw);
                   final fechaTxt = fecha != null
                       ? '${fecha.day.toString().padLeft(2,'0')}/${fecha.month.toString().padLeft(2,'0')}/${fecha.year}'
                       : '';

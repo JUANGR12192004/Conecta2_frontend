@@ -21,22 +21,25 @@ class AccountManagementSheet extends StatefulWidget {
 class _AccountManagementSheetState extends State<AccountManagementSheet> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _nombreCtrl;
-  late final TextEditingController _correoCtrl;
   late final TextEditingController _celularCtrl;
   late final TextEditingController _areaCtrl;
+  final TextEditingController _currentPassCtrl = TextEditingController();
   final TextEditingController _passCtrl = TextEditingController();
   final TextEditingController _confirmCtrl = TextEditingController();
 
   bool _sending = false;
+  bool _loadingInitialData = false;
+  bool _obscureCurrent = true;
   bool _obscurePass = true;
   bool _obscureConfirm = true;
 
-  late final String _initialNombre;
-  late final String _initialCorreo;
-  late final String _initialCelular;
-  late final String _initialArea;
+  String _initialNombre = '';
+  String _initialCelular = '';
+  String _initialArea = '';
 
   bool get _isWorker => widget.role.toLowerCase() == 'worker';
+  bool get _wantsPasswordChange =>
+      _passCtrl.text.isNotEmpty || _confirmCtrl.text.isNotEmpty;
 
   Color get _primary =>
       _isWorker ? const Color(0xFF1E88E5) : const Color(0xFF2E7D32);
@@ -44,28 +47,79 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
   @override
   void initState() {
     super.initState();
-    final data = widget.initialData ?? {};
-    _initialNombre = (data['nombreCompleto'] ?? data['nombre'] ?? '')
-        .toString();
-    _initialCorreo = (data['correo'] ?? data['email'] ?? '').toString();
-    _initialCelular = (data['celular'] ?? data['telefono'] ?? '').toString();
-    _initialArea = (data['areaServicio'] ?? data['area'] ?? '').toString();
+    _hydrateFrom(widget.initialData);
 
     _nombreCtrl = TextEditingController(text: _initialNombre);
-    _correoCtrl = TextEditingController(text: _initialCorreo);
     _celularCtrl = TextEditingController(text: _initialCelular);
     _areaCtrl = TextEditingController(text: _initialArea);
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final bool shouldFetch =
+          !_isWorker || widget.initialData == null || widget.initialData!.isEmpty;
+      if (shouldFetch) _loadInitialData();
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant AccountManagementSheet oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialData != null && widget.initialData != oldWidget.initialData) {
+      setState(() {
+        _hydrateFrom(widget.initialData);
+        _syncControllersWithInitials();
+      });
+    }
   }
 
   @override
   void dispose() {
     _nombreCtrl.dispose();
-    _correoCtrl.dispose();
     _celularCtrl.dispose();
     _areaCtrl.dispose();
+    _currentPassCtrl.dispose();
     _passCtrl.dispose();
     _confirmCtrl.dispose();
     super.dispose();
+  }
+
+  void _hydrateFrom(Map<String, dynamic>? raw) {
+    final data = raw ?? {};
+    _initialNombre = (data['nombreCompleto'] ?? data['nombre'] ?? '').toString();
+    _initialCelular = (data['celular'] ?? data['telefono'] ?? '').toString();
+    _initialArea = (data['areaServicio'] ?? data['area'] ?? '').toString();
+  }
+
+  void _syncControllersWithInitials() {
+    _nombreCtrl.text = _initialNombre;
+    _celularCtrl.text = _initialCelular;
+    _areaCtrl.text = _initialArea;
+  }
+
+  Future<void> _loadInitialData() async {
+    setState(() => _loadingInitialData = true);
+    try {
+      final Map<String, dynamic> data = _isWorker
+          ? await ApiService.fetchWorkerById(widget.userId)
+          : await ApiService.fetchClientById(widget.userId);
+      if (!mounted) return;
+      setState(() {
+        _hydrateFrom(data);
+        _syncControllersWithInitials();
+        _loadingInitialData = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingInitialData = false);
+      final message = e.toString().replaceFirst('Exception: ', '');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No se pudieron cargar los datos: $message'),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 
   Future<void> _submit() async {
@@ -74,25 +128,34 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
     FocusScope.of(context).unfocus();
 
     final nombre = _nombreCtrl.text.trim();
-    final correo = _correoCtrl.text.trim();
     final celular = _celularCtrl.text.trim();
     final area = _areaCtrl.text.trim();
     final pass = _passCtrl.text;
     final confirm = _confirmCtrl.text;
+    final currentPass = _currentPassCtrl.text;
 
     String? nombrePayload;
-    String? correoPayload;
     String? celularPayload;
     String? areaPayload;
     String? passPayload;
     String? confirmPayload;
+    String? currentPassPayload;
 
     if (nombre != _initialNombre) nombrePayload = nombre;
-    if (correo != _initialCorreo) correoPayload = correo;
     if (celular != _initialCelular) celularPayload = celular;
     if (_isWorker && area != _initialArea) areaPayload = area;
 
-    if (pass.isNotEmpty || confirm.isNotEmpty) {
+    if (_wantsPasswordChange) {
+      if (pass.isEmpty || confirm.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Completa la nueva contraseña y su confirmación'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
       if (pass != confirm) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -103,12 +166,22 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
         );
         return;
       }
+      if (currentPass.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Debes ingresar tu contraseña actual'),
+            behavior: SnackBarBehavior.floating,
+            backgroundColor: Colors.red,
+          ),
+        );
+        return;
+      }
       passPayload = pass;
       confirmPayload = confirm;
+      currentPassPayload = currentPass;
     }
 
     if (nombrePayload == null &&
-        correoPayload == null &&
         celularPayload == null &&
         areaPayload == null &&
         passPayload == null &&
@@ -129,20 +202,20 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
         updated = await ApiService.updateWorkerAccount(
           id: widget.userId,
           nombreCompleto: nombrePayload,
-          correo: correoPayload,
           celular: celularPayload,
           areaServicio: areaPayload,
           contrasena: passPayload,
           confirmarContrasena: confirmPayload,
+          contrasenaActual: currentPassPayload,
         );
       } else {
         updated = await ApiService.updateClientAccount(
           id: widget.userId,
           nombreCompleto: nombrePayload,
-          correo: correoPayload,
           celular: celularPayload,
           contrasena: passPayload,
           confirmarContrasena: confirmPayload,
+          contrasenaActual: currentPassPayload,
         );
       }
 
@@ -150,11 +223,18 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
       Navigator.of(context).pop(updated);
     } catch (e) {
       if (!mounted) return;
+      final rawMessage = e.toString().replaceFirst('Exception: ', '').trim();
+      final normalized = rawMessage.toLowerCase();
+      final bool wrongPassword = normalized.contains('contraseña') &&
+          (normalized.contains('actual') ||
+              normalized.contains('incorrecta') ||
+              normalized.contains('invalida') ||
+              normalized.contains('inválida'));
+      final displayMessage =
+          wrongPassword ? 'Contraseña incorrecta' : 'Error: $rawMessage';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(
-            'Error: ${e.toString().replaceFirst('Exception: ', '')}',
-          ),
+          content: Text(displayMessage),
           behavior: SnackBarBehavior.floating,
           backgroundColor: Colors.red,
         ),
@@ -205,6 +285,11 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
                   'Actualiza solo los campos que hayan cambiado. Si deseas cambiar tu contraseña debes confirmarla.',
                   style: TextStyle(color: Colors.black54),
                 ),
+                const SizedBox(height: 6),
+                const Text(
+                  'Tu correo electrónico es tu identificador y no puede modificarse desde aquí.',
+                  style: TextStyle(color: Colors.black54),
+                ),
                 const SizedBox(height: 18),
 
                 TextFormField(
@@ -217,23 +302,6 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
                   validator: (value) {
                     final text = value?.trim() ?? '';
                     if (text.isEmpty) return 'Ingresa tu nombre completo';
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 12),
-
-                TextFormField(
-                  controller: _correoCtrl,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'Correo electrónico',
-                    prefixIcon: Icon(Icons.email_outlined),
-                  ),
-                  validator: (value) {
-                    final text = value?.trim() ?? '';
-                    if (text.isEmpty) return 'Ingresa tu correo';
-                    final regex = RegExp(r'^[^@]+@[^@]+\.[^@]+$');
-                    if (!regex.hasMatch(text)) return 'Correo inválido';
                     return null;
                   },
                 ),
@@ -274,6 +342,34 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
                       const SizedBox(height: 12),
                     ],
                   ),
+
+                TextFormField(
+                  controller: _currentPassCtrl,
+                  obscureText: _obscureCurrent,
+                  decoration: InputDecoration(
+                    labelText: 'Contraseña actual',
+                    helperText: 'Requerida para cambiar la contraseña',
+                    prefixIcon: const Icon(Icons.lock_person_outlined),
+                    suffixIcon: IconButton(
+                      icon: Icon(
+                        _obscureCurrent
+                            ? Icons.visibility
+                            : Icons.visibility_off,
+                      ),
+                      onPressed: () =>
+                          setState(() => _obscureCurrent = !_obscureCurrent),
+                    ),
+                  ),
+                  validator: (value) {
+                    if (!_wantsPasswordChange) return null;
+                    final text = value?.trim() ?? '';
+                    if (text.isEmpty) {
+                      return 'Ingresa tu contraseña actual';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 12),
 
                 TextFormField(
                   controller: _passCtrl,

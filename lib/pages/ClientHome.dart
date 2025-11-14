@@ -26,6 +26,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   Map<String, dynamic>? _initialArgs;
 
   List<Map<String, dynamic>> _services = [];
+  List<Map<String, dynamic>> _expiredServices = [];
   bool _loading = false;
   String? _error;
 
@@ -153,7 +154,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       case 'FINALIZADO':
         return 'Finalizado';
       case 'CANCELADO':
-        return 'Cancelado';
+        return 'Expirado';
       default:
         return value[0].toUpperCase() + value.substring(1).toLowerCase();
     }
@@ -213,6 +214,31 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   String _currentName() => _stringFromSources(['nombreCompleto', 'nombre', 'fullName']);
   String _currentEmail() => _stringFromSources(['correo', 'email', 'correoElectronico']);
 
+  DateTime? _parseServiceDate(dynamic raw) {
+    if (raw == null) return null;
+    final text = raw.toString().trim();
+    if (text.isEmpty) return null;
+    try {
+      final parsed = DateTime.parse(text);
+      return parsed.isUtc ? parsed.toLocal() : parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isDateExpired(DateTime? date) {
+    if (date == null) return false;
+    final cutoff = DateTime(date.year, date.month, date.day, 23, 59, 59);
+    return DateTime.now().isAfter(cutoff);
+  }
+
+  bool _isServiceExpired(Map<String, dynamic> service) {
+    final estadoRaw = (service['estado'] ?? service['estadoServicio'] ?? service['status'] ?? '').toString();
+    if (estadoRaw.toUpperCase() == 'CANCELADO') return true;
+    final date = _parseServiceDate(service['fechaEstimada'] ?? service['fecha']);
+    return _isDateExpired(date);
+  }
+
   Future<void> _reload() async {
     await _loadServices();
   }
@@ -225,8 +251,18 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     try {
       final list = await ApiService.getServices();
       if (!mounted) return;
+      final active = <Map<String, dynamic>>[];
+      final expired = <Map<String, dynamic>>[];
+      for (final service in list) {
+        if (_isServiceExpired(service)) {
+          expired.add(service);
+        } else {
+          active.add(service);
+        }
+      }
       setState(() {
-        _services = list;
+        _services = active;
+        _expiredServices = expired;
         _loading = false;
       });
     } catch (e) {
@@ -234,6 +270,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       setState(() {
         _error = e.toString().replaceFirst('Exception: ', '');
         _loading = false;
+        _expiredServices = [];
       });
     }
   }
@@ -655,6 +692,8 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
             : ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
+                  if (_expiredServices.isNotEmpty)
+                    _buildExpiredServicesBanner(),
                   ...List.generate(_services.length, (i) {
                     final s = _services[i];
                     final titulo = (s['titulo'] ?? '').toString();
@@ -663,6 +702,11 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                     final estadoRaw = (s['estado'] ?? s['estadoServicio'] ?? s['status'] ?? 'PENDIENTE').toString();
                     final estadoUpper = estadoRaw.toUpperCase();
                     final estadoLabel = _serviceStateLabel(estadoRaw);
+                    final fechaRaw = s['fechaEstimada'] ?? s['fecha'];
+                    final fecha = _parseServiceDate(fechaRaw);
+                    final fechaTxt = fecha != null
+                        ? '${fecha.day.toString().padLeft(2,'0')}/${fecha.month.toString().padLeft(2,'0')}/${fecha.year}'
+                        : '';
                     final int? serviceId = () {
                       final v = s['id'];
                       if (v == null) return null;
@@ -687,6 +731,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                             final parts = <String>[
                               if (ubicacion.isNotEmpty) ubicacion,
                               if (categoria.isNotEmpty) categoria,
+                              if (fechaTxt.isNotEmpty) 'Fecha: $fechaTxt',
                               if (estadoLabel.isNotEmpty) 'Estado: $estadoLabel',
                             ];
                             if (parts.isEmpty) return null;
@@ -762,6 +807,103 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                 ],
               ),
       ),
+    );
+  }
+
+  Widget _buildExpiredServicesBanner() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.hourglass_bottom, color: Colors.orange),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              _expiredServices.length == 1
+                  ? '1 solicitud expiró y se ocultó del listado.'
+                  : '${_expiredServices.length} solicitudes expiraron y se ocultaron del listado.',
+              style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+            ),
+          ),
+          TextButton(
+            onPressed: _showExpiredServicesSheet,
+            child: const Text('Ver'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showExpiredServicesSheet() async {
+    if (_expiredServices.isEmpty) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (ctx) {
+        final height = MediaQuery.of(ctx).size.height * 0.6;
+        return SizedBox(
+          height: height,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.black26,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Solicitudes vencidas',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                if (_expiredServices.isEmpty)
+                  const Center(child: Text('No hay solicitudes vencidas.')),
+                if (_expiredServices.isNotEmpty)
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: _expiredServices.length,
+                      separatorBuilder: (_, __) => const Divider(height: 16),
+                      itemBuilder: (context, index) {
+                        final svc = _expiredServices[index];
+                        final titulo = (svc['titulo'] ?? 'Servicio').toString();
+                        final fecha = _parseServiceDate(svc['fechaEstimada'] ?? svc['fecha']);
+                        final fechaTxt = fecha != null
+                            ? '${fecha.day.toString().padLeft(2,'0')}/${fecha.month.toString().padLeft(2,'0')}/${fecha.year}'
+                            : 'Fecha no disponible';
+                        final ubicacion = (svc['ubicacion'] ?? '').toString();
+                        final categoria = categoryDisplayLabel((svc['categoria'] ?? '').toString());
+                        return ListTile(
+                          leading: const Icon(Icons.warning_amber_outlined, color: Colors.orange),
+                          title: Text(titulo, style: const TextStyle(fontWeight: FontWeight.w700)),
+                          subtitle: Text(
+                            [
+                              'Expiró el $fechaTxt',
+                              if (ubicacion.isNotEmpty) ubicacion,
+                              if (categoria.isNotEmpty) categoria,
+                            ].join(' · '),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }
