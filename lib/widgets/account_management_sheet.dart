@@ -291,6 +291,10 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
                   style: TextStyle(color: Colors.black54),
                 ),
                 const SizedBox(height: 18),
+                if (_loadingInitialData) ...[
+                  const LinearProgressIndicator(minHeight: 3),
+                  const SizedBox(height: 18),
+                ],
 
                 TextFormField(
                   controller: _nombreCtrl,
@@ -334,8 +338,9 @@ class _AccountManagementSheetState extends State<AccountManagementSheet> {
                         ),
                         validator: (value) {
                           final text = value?.trim() ?? '';
-                          if (text.isEmpty)
+                          if (text.isEmpty) {
                             return 'Ingresa tu área de servicio';
+                          }
                           return null;
                         },
                       ),

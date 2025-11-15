@@ -2,11 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
 // OJO: respeta las mayúsculas/minúsculas EXACTAS de tus archivos/clases
-import 'pages/Login.dart';
-import 'pages/RegisterWorker.dart';
-import 'pages/RegisterClient.dart';
-import 'pages/ClientHome.dart';
-import 'pages/WorkerHome.dart';
+import 'pages/login.dart';
+import 'pages/register_worker.dart';
+import 'pages/register_client.dart';
+import 'pages/client_home.dart';
+import 'pages/worker_home.dart';
 
 
 void main() {

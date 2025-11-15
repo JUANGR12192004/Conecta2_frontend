@@ -18,7 +18,6 @@ class _LoginPageState extends State<LoginPage> {
   late String _role; // "worker" | "client"
 
   // 🔹 Token en memoria (TRABAJADOR)
-  String? _accessToken;
 
   @override
   void didChangeDependencies() {
@@ -94,7 +93,6 @@ class _LoginPageState extends State<LoginPage> {
         // 🔹 TOMAR TOKEN de trabajador si viene en la respuesta
         final tok = resp['token'] as String?;
         if (tok != null && tok.isNotEmpty) {
-          setState(() => _accessToken = tok);
           // TODO: si deseas persistir: usa flutter_secure_storage
           // final storage = const FlutterSecureStorage();
           // await storage.write(key: 'auth_token', value: tok);

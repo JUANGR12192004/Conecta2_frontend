@@ -34,7 +34,9 @@ class _CurrentLocationMapState extends State<CurrentLocationMap> {
         setState(() => _error = 'Permiso de ubicación denegado');
         return;
       }
-      final pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(accuracy: LocationAccuracy.high),
+      );
       if (!mounted) return;
       setState(() => _me = LatLng(pos.latitude, pos.longitude));
       final ctrl = await _mapCtrl.future;

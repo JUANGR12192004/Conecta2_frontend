@@ -1,3 +1,10 @@
+import org.gradle.api.tasks.Delete
+
+plugins {
+    id("com.android.application") version "8.5.0" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+}
+
 allprojects {
     repositories {
         google()
@@ -5,20 +12,17 @@ allprojects {
     }
 }
 
-val newBuildDir: Directory =
-    rootProject.layout.buildDirectory
-        .dir("../../build")
-        .get()
-rootProject.layout.buildDirectory.value(newBuildDir)
+val sharedBuildDir = rootProject.layout.buildDirectory.dir("../../build")
+rootProject.layout.buildDirectory.set(sharedBuildDir)
 
 subprojects {
-    val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
-    project.layout.buildDirectory.value(newSubprojectBuildDir)
-}
-subprojects {
-    project.evaluationDependsOn(":app")
+    // Reuse the shared build directory so app/ and plugin builds go to `<repo>/build`.
+    layout.buildDirectory.set(sharedBuildDir.map { it.dir(name) })
+    evaluationDependsOn(":app")
 }
 
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }
+
+

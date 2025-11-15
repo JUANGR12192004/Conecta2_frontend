@@ -27,7 +27,6 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
   Map<String, dynamic>? _initialArgs;
   // Oportunidades
   List<Map<String, dynamic>> _opportunities = [];
-  bool _opLoading = false;
   String? _opError;
   int _hiddenExpiredOpportunities = 0;
   // Notificaciones para trabajador (contraofertas/aceptaciones)
@@ -133,6 +132,8 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
     switch (value.toUpperCase()) {
       case 'PENDIENTE':
         return 'Pendiente';
+      case 'PENDIENTE_PAGO':
+        return 'Pago pendiente';
       case 'ASIGNADO':
         return 'Asignado';
       case 'EN_PROCESO':
@@ -277,19 +278,18 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
     final area = _currentArea();
     final categoria = normalizeCategoryValue(area);
     if (categoria.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _opportunities = [];
-          _opError = null;
-          _hiddenExpiredOpportunities = 0;
-        });
-      }
+    if (mounted) {
+      setState(() {
+        _opportunities = [];
+        _opError = null;
+        _hiddenExpiredOpportunities = 0;
+      });
+    }
       return;
     }
 
     if (mounted) {
       setState(() {
-        _opLoading = true;
         _opError = null;
       });
     }
@@ -308,14 +308,12 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
       }
       setState(() {
         _opportunities = filtered;
-        _opLoading = false;
         _hiddenExpiredOpportunities = expiredCount;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _opError = e.toString().replaceFirst('Exception: ', '');
-        _opLoading = false;
         _hiddenExpiredOpportunities = 0;
       });
     }
@@ -495,10 +493,11 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
                         onPressed: sending
                             ? null
                             : () async {
+                                final messenger = ScaffoldMessenger.of(context);
                                 final raw = priceCtrl.text.trim().replaceAll(',', '.');
                                 final price = double.tryParse(raw);
                                 if (price == null || price <= 0) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text('Ingresa un precio válido'),
                                       behavior: SnackBarBehavior.floating,
@@ -515,9 +514,10 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
                                     precio: price,
                                     mensaje: noteCtrl.text.trim(),
                                   );
-                                  if (!mounted) return;
+                                  if (!ctx.mounted) return;
                                   Navigator.pop(ctx);
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  if (!mounted) return;
+                                  messenger.showSnackBar(
                                     const SnackBar(
                                       content: Text('Oferta enviada âœ…'),
                                       behavior: SnackBarBehavior.floating,
@@ -526,7 +526,7 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
                                   );
                                 } catch (e) {
                                   if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  messenger.showSnackBar(
                                     SnackBar(
                                       content: Text('Error al ofertar: $e'),
                                       behavior: SnackBarBehavior.floating,
@@ -686,7 +686,6 @@ class _WorkerHomeState extends State<WorkerHome> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildPlaceholderCard() { return Card(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)), elevation: 1, child: Padding(padding: const EdgeInsets.all(16), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: const [Text('Tus oportunidades', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)), SizedBox(height: 8), Text('Aquí verás las solicitudes de los clientes y podrás responderlas. Mientras tanto, asegúrate de mantener tu información al día.', style: TextStyle(color: Colors.black54)),],),),); }
   @override
   Widget build(BuildContext context) {
     final body = RefreshIndicator(
@@ -797,6 +796,7 @@ _buildMapCard(),
                 _removeOpportunityByServiceId(serviceId);
               }
               await _fetchOpportunities();
+              if (!mounted) return;
               final color = upper == 'ACCEPT'
                   ? Colors.green
                   : upper == 'REJECT'
@@ -807,6 +807,7 @@ _buildMapCard(),
                   : upper == 'REJECT'
                       ? 'Oferta rechazada'
                       : 'Contraoferta enviada';
+              if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(text),
@@ -1117,6 +1118,8 @@ if (_opError != null) {
                       statusColor = Colors.green; break;
                     case 'CANCELADO':
                       statusColor = Colors.red; break;
+                    case 'PENDIENTE_PAGO':
+                      statusColor = Colors.amber.shade800; break;
                     default:
                       statusColor = Colors.orange; break;
                   }
@@ -1224,7 +1227,6 @@ if (_opError != null) {
     );
   }
 }
-
 
 
 

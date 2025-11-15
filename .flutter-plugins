@@ -1,0 +1,13 @@
+# This is a generated file; do not edit or check into version control.
+flutter_plugin_android_lifecycle=/root/.pub-cache/hosted/pub.dev/flutter_plugin_android_lifecycle-2.0.26/
+geolocator=/root/.pub-cache/hosted/pub.dev/geolocator-14.0.2/
+geolocator_android=/root/.pub-cache/hosted/pub.dev/geolocator_android-5.0.2/
+geolocator_apple=/root/.pub-cache/hosted/pub.dev/geolocator_apple-2.3.13/
+geolocator_linux=/root/.pub-cache/hosted/pub.dev/geolocator_linux-0.2.3/
+geolocator_web=/root/.pub-cache/hosted/pub.dev/geolocator_web-4.1.3/
+geolocator_windows=/root/.pub-cache/hosted/pub.dev/geolocator_windows-0.2.5/
+google_maps_flutter=/root/.pub-cache/hosted/pub.dev/google_maps_flutter-2.10.0/
+google_maps_flutter_android=/root/.pub-cache/hosted/pub.dev/google_maps_flutter_android-2.14.13/
+google_maps_flutter_ios=/root/.pub-cache/hosted/pub.dev/google_maps_flutter_ios-2.15.2/
+google_maps_flutter_web=/root/.pub-cache/hosted/pub.dev/google_maps_flutter_web-0.5.12/
+package_info_plus=/root/.pub-cache/hosted/pub.dev/package_info_plus-8.3.1/

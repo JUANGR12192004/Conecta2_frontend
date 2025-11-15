@@ -10,10 +10,15 @@ class ApiService {
   static String host = kIsWeb
       ? "http://localhost:8080"
       : "http://localhost:8080";
+  // Microservicio de pagos (pasarela). Se puede ajustar si corre en otro host/puerto.
+  static String paymentsHost = host;
 
   static String get _apiPrefix => "/api/v1";
   static Uri _u(String path, {Map<String, String>? query}) =>
       Uri.parse("$host$_apiPrefix$path").replace(queryParameters: query);
+
+  static Uri _payments(String path, {Map<String, String>? query}) =>
+      Uri.parse("$paymentsHost$path").replace(queryParameters: query);
 
   /// Construye URIs fuera de `/api/v1` (compatibilidad con rutas legacy).
   static Uri _absolute(String path, {Map<String, String>? query}) =>
@@ -361,7 +366,7 @@ class ApiService {
       );
     }
 
-    Exception? firstError;
+    late final Exception firstError;
     try {
       return await attempt(_u("/clients/$id"));
     } catch (e) {
@@ -371,8 +376,7 @@ class ApiService {
     try {
       return await attempt(_absolute("/api/Clientes/$id"));
     } catch (e) {
-      final secondError = e is Exception ? e : Exception(e.toString());
-      throw firstError ?? secondError;
+      throw firstError;
     }
   }
 
@@ -424,7 +428,7 @@ class ApiService {
       return _processResponse(res, "actualización de cliente");
     }
 
-    Exception? firstError;
+    late final Exception firstError;
     try {
       return await attempt(_u("/clients/$id"));
     } catch (e) {
@@ -434,8 +438,7 @@ class ApiService {
     try {
       return await attempt(_absolute("/api/Clientes/$id"));
     } catch (e) {
-      final fallbackError = e is Exception ? e : Exception(e.toString());
-      throw firstError ?? fallbackError;
+      throw firstError;
     }
   }
 
@@ -671,6 +674,92 @@ class ApiService {
     return _processResponse(res, "contraoferta del trabajador");
   }
 
+  // ==========================
+  // PAGOS / PASARELA
+  // ==========================
+
+  /// Obtiene la información del intent de pago asociado a una oferta.
+  /// Endpoint: GET /api/v1/payments/offers/{offerId}?refresh=false
+  static Future<Map<String, dynamic>> getOfferPaymentInfo({
+    required int offerId,
+    bool refresh = false,
+  }) async {
+    final res = await http
+        .get(
+          _u(
+            "/payments/offers/$offerId",
+            query: {"refresh": refresh ? "true" : "false"},
+          ),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode == 200) {
+      final decoded = res.body.isNotEmpty ? jsonDecode(res.body) : {};
+      if (decoded is Map<String, dynamic>) return decoded;
+      throw Exception("Respuesta inesperada del backend de pagos.");
+    }
+
+    if (res.statusCode == 403) {
+      throw Exception("No autorizado para consultar este pago (403).");
+    }
+
+    throw Exception(
+      "Error obteniendo estado del pago (${res.statusCode}): ${res.body}",
+    );
+  }
+
+  /// Fuerza un refresh manual cuando el webhook aún no llega.
+  /// Endpoint: POST /api/v1/payments/offers/{offerId}/refresh
+  static Future<Map<String, dynamic>> refreshOfferPayment(int offerId) async {
+    final res = await http
+        .post(
+          _u("/payments/offers/$offerId/refresh"),
+          headers: _jsonHeaders(auth: true, role: 'client'),
+        )
+        .timeout(const Duration(seconds: 15));
+    return _processResponse(res, "actualización de pago");
+  }
+
+  /// Confirma un intent directamente contra el microservicio de pasarela.
+  /// Endpoint: POST /payments/intents/{id}/confirm
+  static Future<Map<String, dynamic>> confirmPaymentIntent({
+    required String paymentIntentId,
+    required String clientSecret,
+    required Map<String, dynamic> paymentMethod,
+    Map<String, dynamic>? billingDetails,
+    Map<String, dynamic>? metadata,
+  }) async {
+    final body = <String, dynamic>{
+      "clientSecret": clientSecret,
+      "paymentMethod": paymentMethod,
+      if (billingDetails != null) "billingDetails": billingDetails,
+      if (metadata != null) "metadata": metadata,
+    };
+
+    final res = await http
+        .post(
+          _payments("/payments/intents/$paymentIntentId/confirm"),
+          headers: const {"Content-Type": "application/json"},
+          body: jsonEncode(body),
+        )
+        .timeout(const Duration(seconds: 15));
+
+    if (res.statusCode == 200 || res.statusCode == 201) {
+      final decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
+      if (decoded is Map<String, dynamic>) return decoded;
+      return {"ok": true, "raw": res.body};
+    }
+
+    if (res.statusCode == 400) {
+      throw Exception("Pasarela rechazó la confirmación (400): ${res.body}");
+    }
+
+    throw Exception(
+      "Error confirmando el pago (${res.statusCode}): ${res.body}",
+    );
+  }
+
   static Future<List<Map<String, dynamic>>> getServicesByClientPublic(
     int clientId,
   ) async {
@@ -779,7 +868,7 @@ class ApiService {
         )
         .timeout(const Duration(seconds: 15));
 
-    Map<String, dynamic> _normalize(dynamic decoded, {bool defaultSuccess = true}) {
+    Map<String, dynamic> normalizeResponse(dynamic decoded, {bool defaultSuccess = true}) {
       if (decoded is Map<String, dynamic>) {
         final success = decoded["exitoso"] ?? decoded["success"] ?? defaultSuccess;
         final message = decoded["mensaje"] ?? decoded["message"] ?? (success == true ? "Servicio eliminado." : "No fue posible eliminar el servicio.");
@@ -794,31 +883,31 @@ class ApiService {
         "exitoso": defaultSuccess,
         if (msg != null && msg.isNotEmpty) "mensaje": msg,
       };
-    }
-
-    if (res.statusCode == 204 || res.statusCode == 200) {
-      dynamic decoded;
-      try {
-        decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
-      } catch (_) {
-        decoded = null;
       }
-      return _normalize(decoded, defaultSuccess: true);
-    }
 
-    if (res.statusCode == 403) {
-      throw Exception("No autorizado. Verifica el token (403).");
-    }
-    if (res.statusCode == 409) {
-      dynamic decoded;
-      try {
-        decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
-      } catch (_) {
-        decoded = null;
+      if (res.statusCode == 204 || res.statusCode == 200) {
+        dynamic decoded;
+        try {
+          decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
+        } catch (_) {
+          decoded = null;
+        }
+        return normalizeResponse(decoded, defaultSuccess: true);
       }
-      final normalized = _normalize(decoded, defaultSuccess: false);
-      throw Exception(normalized["mensaje"] ?? "Solo los servicios pendientes pueden eliminarse (409).");
-    }
+
+      if (res.statusCode == 403) {
+        throw Exception("No autorizado. Verifica el token (403).");
+      }
+      if (res.statusCode == 409) {
+        dynamic decoded;
+        try {
+          decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
+        } catch (_) {
+          decoded = null;
+        }
+        final normalized = normalizeResponse(decoded, defaultSuccess: false);
+        throw Exception(normalized["mensaje"] ?? "Solo los servicios pendientes pueden eliminarse (409).");
+      }
 
     throw Exception("Error eliminando servicio (${res.statusCode}): ${res.body}");
   }
@@ -845,21 +934,28 @@ class ApiService {
           ? decoded
           : {"ok": true, "raw": body};
     }
-    if (status == 400)
+    if (status == 400) {
       throw Exception(_msg(decoded, fallback: "Petición inválida ($proceso)"));
-    if (status == 401)
+    }
+    if (status == 401) {
       throw Exception(_msg(decoded, fallback: "No autorizado (401)."));
-    if (status == 403)
+    }
+    if (status == 403) {
       throw Exception(_msg(decoded, fallback: "Prohibido (403)."));
-    if (status >= 500) throw Exception("Error del servidor ($status): $body");
+    }
+    if (status >= 500) {
+      throw Exception("Error del servidor ($status): $body");
+    }
     throw Exception(_msg(decoded, fallback: "Error en $proceso: $body"));
   }
 
   static String _msg(dynamic decoded, {required String fallback}) {
-    if (decoded is Map && decoded["mensaje"] is String)
+    if (decoded is Map && decoded["mensaje"] is String) {
       return decoded["mensaje"];
-    if (decoded is Map && decoded["message"] is String)
+    }
+    if (decoded is Map && decoded["message"] is String) {
       return decoded["message"];
+    }
     return fallback;
   }
 }

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../services/api_service.dart';
@@ -5,6 +7,7 @@ import '../widgets/account_management_sheet.dart';
 import '../widgets/profile_popover.dart';
 import '../utils/categories.dart';
 import '../widgets/current_location_map.dart';
+import '../widgets/payment_checkout_sheet.dart';
 
 const _primary = Color(0xFF2E7D32);
 
@@ -19,8 +22,6 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   late TabController _tab;
 
   Map<String, dynamic>? _profile;
-  bool _profileLoading = false;
-  String? _profileError;
   int? _clientId;
   bool _didLoadArgs = false;
   Map<String, dynamic>? _initialArgs;
@@ -28,7 +29,6 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   List<Map<String, dynamic>> _services = [];
   List<Map<String, dynamic>> _expiredServices = [];
   bool _loading = false;
-  String? _error;
   final Set<int> _expiryWarningIds = {};
   final Set<int> _autoDeletedServiceIds = {};
 
@@ -36,8 +36,10 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   List<Map<String, dynamic>> _offers = [];
   bool _offersLoading = false;
   String? _offersError;
-  Duration _offersPollEvery = const Duration(seconds: 15);
-  Future<void>? _offersPollTimer;
+  final Duration _offersPollEvery = const Duration(seconds: 15);
+  Timer? _offersPollTimer;
+  final Map<int, Map<String, dynamic>> _pendingPaymentsByService = {};
+  StateSetter? _notificationsSetState;
 
   final List<String> _categorias = kServiceCategoryLabels.keys.toList();
 
@@ -149,6 +151,8 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     switch (value.toUpperCase()) {
       case 'PENDIENTE':
         return 'Pendiente';
+      case 'PENDIENTE_PAGO':
+        return 'Pago pendiente';
       case 'ASIGNADO':
         return 'Asignado';
       case 'EN_PROCESO':
@@ -201,6 +205,120 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     final asDouble = double.tryParse(raw);
     if (asDouble != null) return DateTime.fromMillisecondsSinceEpoch(asDouble.toInt());
     return null;
+  }
+
+  String? _serviceTitleById(int? serviceId) {
+    if (serviceId == null) return null;
+    for (final service in _services) {
+      final id = _serviceIdFromService(service);
+      if (id != null && id == serviceId) {
+        final title = (service['titulo'] ?? service['nombre'] ?? service['tituloServicio'] ?? '').toString();
+        if (title.isNotEmpty) return title;
+      }
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _pendingPaymentForService(int? serviceId) {
+    if (serviceId == null) return null;
+    return _pendingPaymentsByService[serviceId];
+  }
+
+  Map<String, dynamic>? _stringKeyedMap(dynamic raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is Map) {
+      return raw.map((key, value) => MapEntry(key.toString(), value));
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _normalizePaymentInfo(
+    dynamic raw, {
+    int? fallbackServiceId,
+    int? fallbackOfferId,
+    String? fallbackServiceTitle,
+  }) {
+    final base = _stringKeyedMap(raw);
+    if (base == null) return null;
+    Map<String, dynamic> map = Map<String, dynamic>.from(base);
+    if (map['paymentInfo'] is Map) {
+      final nested = _stringKeyedMap(map['paymentInfo']);
+      if (nested != null) {
+        map = {
+          ...map,
+          ...nested,
+        };
+      }
+    }
+
+    final serviceId = _asInt(
+      map['serviceId'] ?? map['servicioId'] ?? map['service_id'] ?? fallbackServiceId,
+    );
+    final offerId = _asInt(
+      map['offerId'] ?? map['ofertaId'] ?? map['oferta_id'] ?? fallbackOfferId,
+    );
+
+    final paymentIntentId = map['paymentIntentId'] ?? map['paymentIntent'] ?? map['intentId'];
+    final clientSecret = map['paymentClientSecret'] ?? map['clientSecret'];
+    final status = (map['paymentStatus'] ?? map['payment_state'] ?? map['status'] ?? '').toString();
+    final amount = _asDouble(map['amount'] ?? map['monto'] ?? map['precio']);
+    final currency = map['currency'] ?? map['moneda'];
+    final serviceTitle = (map['serviceTitle'] ?? map['tituloServicio'] ?? fallbackServiceTitle ?? '').toString();
+
+    return {
+      ...map,
+      if (serviceId != null) 'serviceId': serviceId,
+      if (offerId != null) 'offerId': offerId,
+      if (paymentIntentId != null) 'paymentIntentId': paymentIntentId,
+      if (clientSecret != null) 'paymentClientSecret': clientSecret,
+      if (status.isNotEmpty) 'paymentStatus': status,
+      if (amount != null) 'amount': amount,
+      if (currency != null) 'currency': currency,
+      if (serviceTitle.isNotEmpty) 'serviceTitle': serviceTitle,
+    };
+  }
+
+  String _paymentStatusUpper(dynamic raw) {
+    if (raw == null) return '';
+    final text = raw.toString().trim();
+    if (text.isEmpty) return '';
+    return text.toUpperCase();
+  }
+
+  String _paymentStatusLabel(dynamic raw) {
+    final upper = _paymentStatusUpper(raw);
+    switch (upper) {
+      case 'PENDING':
+        return 'Pago pendiente';
+      case 'REQUIRES_ACTION':
+        return 'Se requiere acción';
+      case 'SUCCEEDED':
+        return 'Pago confirmado';
+      case 'FAILED':
+        return 'Pago rechazado';
+      case 'NOT_REQUIRED':
+        return 'No requiere pago';
+      default:
+        return upper.isEmpty
+            ? 'Pago'
+            : upper[0].toUpperCase() + upper.substring(1).toLowerCase();
+    }
+  }
+
+  Color _paymentStatusColor(dynamic raw) {
+    final upper = _paymentStatusUpper(raw);
+    switch (upper) {
+      case 'SUCCEEDED':
+        return Colors.green;
+      case 'FAILED':
+        return Colors.red;
+      case 'REQUIRES_ACTION':
+        return Colors.deepOrange;
+      case 'PENDING':
+        return Colors.orange;
+      default:
+        return Colors.blueGrey;
+    }
   }
 
   String _serviceStateUpper(Map<String, dynamic> service) {
@@ -340,7 +458,6 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   Future<void> _loadServices() async {
     setState(() {
       _loading = true;
-      _error = null;
     });
     try {
       final list = await ApiService.getServices();
@@ -365,30 +482,36 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString().replaceFirst('Exception: ', '');
         _loading = false;
         _expiredServices = [];
       });
+      _showClientNotification(
+        'No fue posible cargar tus servicios: ${e.toString().replaceFirst("Exception: ", '')}',
+        background: Colors.red,
+      );
     }
   }
 
   Future<void> _refreshProfile() async {
     final id = _clientId;
     if (id == null) return;
-    setState(() { _profileLoading = true; _profileError = null; });
     try {
       final data = await ApiService.fetchClientById(id);
       if (!mounted) return;
-      setState(() { _profile = data; _profileLoading = false; });
+      setState(() { _profile = data; });
     } catch (e) {
       if (!mounted) return;
-      setState(() { _profileError = e.toString().replaceFirst('Exception: ', ''); _profileLoading = false; });
+      _showClientNotification(
+        'No pudimos actualizar tu perfil: ${e.toString().replaceFirst("Exception: ", '')}',
+        background: Colors.red,
+      );
     }
   }
 
   // Ofertas
   void _startOffersPolling() {
-    _offersPollTimer = Future.delayed(_offersPollEvery, () async {
+    _offersPollTimer?.cancel();
+    _offersPollTimer = Timer(_offersPollEvery, () async {
       if (!mounted) return;
       await _fetchOffers();
       if (!mounted) return;
@@ -396,7 +519,10 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     });
   }
 
-  void _stopOffersPolling() { _offersPollTimer = null; }
+  void _stopOffersPolling() {
+    _offersPollTimer?.cancel();
+    _offersPollTimer = null;
+  }
 
   Future<void> _fetchOffers() async {
     final id = _clientId; if (id == null) return;
@@ -406,6 +532,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       if (!mounted) return;
       setState(() { _offers = list; _offersLoading = false; });
       _processAcceptedOffers(list);
+      _syncPendingPaymentsFromOffers(list);
     } catch (e) {
       if (!mounted) return;
       setState(() { _offersError = e.toString().replaceFirst('Exception: ', ''); _offersLoading = false; });
@@ -417,9 +544,110 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       final estadoRaw = (offer['estadoNegociacion'] ?? offer['estado'] ?? '').toString().toUpperCase();
       if (estadoRaw == 'ACEPTADA') {
         final serviceId = _serviceIdFromOffer(offer);
-        if (serviceId != null) _updateLocalServiceState(serviceId, 'ASIGNADO');
+        if (serviceId != null) {
+          final paymentInfo = _normalizePaymentInfo(
+            offer,
+            fallbackServiceId: serviceId,
+            fallbackOfferId: _asInt(offer['id']),
+            fallbackServiceTitle: _serviceTitleById(serviceId),
+          );
+          final statusUpper = _paymentStatusUpper(paymentInfo?['paymentStatus']);
+          if (statusUpper == 'SUCCEEDED') {
+            _updateLocalServiceState(serviceId, 'ASIGNADO');
+          } else {
+            _updateLocalServiceState(serviceId, 'PENDIENTE_PAGO');
+          }
+          if (paymentInfo != null) {
+            _queuePaymentInfoUpdate(paymentInfo);
+          }
+        }
       }
     }
+  }
+
+  void _queuePaymentInfoUpdate(Map<String, dynamic> info) {
+    final serviceId = _asInt(info['serviceId'] ?? info['servicioId']);
+    if (serviceId == null) return;
+    setState(() {
+      final statusUpper = _paymentStatusUpper(info['paymentStatus'] ?? info['status']);
+      if (statusUpper == 'SUCCEEDED' || statusUpper == 'NOT_REQUIRED') {
+        _pendingPaymentsByService.remove(serviceId);
+      } else {
+        final existing = _pendingPaymentsByService[serviceId] ?? {};
+        _pendingPaymentsByService[serviceId] = {
+          ...existing,
+          ...info,
+          'serviceId': serviceId,
+          'serviceTitle': info['serviceTitle'] ?? existing['serviceTitle'] ?? _serviceTitleById(serviceId),
+        };
+      }
+    });
+    _notificationsSetState?.call(() {});
+  }
+
+  void _syncPendingPaymentsFromOffers(List<Map<String, dynamic>> offers) {
+    final updates = <Map<String, dynamic>>[];
+    for (final offer in offers) {
+      final normalized = _normalizePaymentInfo(
+        offer,
+        fallbackOfferId: _asInt(offer['id']),
+        fallbackServiceId: _serviceIdFromOffer(offer),
+        fallbackServiceTitle: (offer['serviceTitle'] ?? offer['tituloServicio'] ?? '').toString(),
+      );
+      if (normalized != null) {
+        updates.add(normalized);
+      }
+    }
+    if (updates.isEmpty) return;
+    setState(() {
+      for (final info in updates) {
+        final serviceId = _asInt(info['serviceId']);
+        if (serviceId == null) continue;
+        final statusUpper = _paymentStatusUpper(info['paymentStatus']);
+        if (statusUpper == 'SUCCEEDED' || statusUpper == 'NOT_REQUIRED') {
+          _pendingPaymentsByService.remove(serviceId);
+        } else {
+          final existing = _pendingPaymentsByService[serviceId] ?? {};
+          _pendingPaymentsByService[serviceId] = {
+            ...existing,
+            ...info,
+            'serviceId': serviceId,
+            'serviceTitle': info['serviceTitle'] ?? existing['serviceTitle'] ?? _serviceTitleById(serviceId),
+          };
+        }
+      }
+    });
+    _notificationsSetState?.call(() {});
+  }
+
+  Future<void> _openPaymentCheckout({
+    required int offerId,
+    int? serviceId,
+    Map<String, dynamic>? initialInfo,
+  }) async {
+    final existing = initialInfo ?? _pendingPaymentForService(serviceId);
+    final title = (existing?['serviceTitle'] ?? _serviceTitleById(serviceId) ?? '').toString();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      useSafeArea: true,
+      builder: (_) => PaymentCheckoutSheet(
+        offerId: offerId,
+        serviceId: serviceId,
+        serviceTitle: title.isEmpty ? null : title,
+        initialPaymentInfo: existing,
+        onPaymentInfo: (info) {
+          _queuePaymentInfoUpdate(info);
+        },
+        onPaymentFailed: (info) {
+          _queuePaymentInfoUpdate(info);
+        },
+        onPaymentSucceeded: () async {
+          await _loadServices();
+        },
+      ),
+    );
   }
 
   Future<void> _openNotifications() async {
@@ -432,6 +660,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       useSafeArea: true,
       builder: (ctx) {
         return StatefulBuilder(builder: (ctx, setM) {
+          _notificationsSetState = setM;
           void removeLocal(int id) {
             setM(() => _offers.removeWhere((o) {
                   final raw = o['id'];
@@ -442,16 +671,60 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
 
           Future<void> doAccept(int id, int? serviceId) async {
             try {
-              await ApiService.clientRespondOffer(offerId: id, action: 'ACCEPT');
+              final response = await ApiService.clientRespondOffer(offerId: id, action: 'ACCEPT');
+              final paymentInfo = _normalizePaymentInfo(
+                response,
+                fallbackOfferId: id,
+                fallbackServiceId: serviceId,
+                fallbackServiceTitle: _serviceTitleById(serviceId),
+              );
+              final statusUpper = _paymentStatusUpper(paymentInfo?['paymentStatus']);
+              final bool requiresPayment = statusUpper.isEmpty ||
+                  statusUpper == 'PENDING' ||
+                  statusUpper == 'REQUIRES_ACTION';
+
               removeLocal(id);
-              if (mounted) _updateLocalServiceState(serviceId, 'ASIGNADO');
-              await _loadServices();
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Servicio asignado'), behavior: SnackBarBehavior.floating, backgroundColor: _primary),
+              if (paymentInfo != null) {
+                _queuePaymentInfoUpdate(paymentInfo);
+              }
+
+              if (mounted && serviceId != null) {
+                _updateLocalServiceState(
+                  serviceId,
+                  requiresPayment ? 'PENDIENTE_PAGO' : 'ASIGNADO',
                 );
               }
+
+              await _loadServices();
+
+              if (requiresPayment) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Oferta aceptada. Completa el pago para asignar el servicio.'),
+                      behavior: SnackBarBehavior.floating,
+                      backgroundColor: _primary,
+                    ),
+                  );
+                }
+                await _openPaymentCheckout(
+                  offerId: id,
+                  serviceId: serviceId,
+                  initialInfo: paymentInfo,
+                );
+              } else {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Servicio asignado'),
+                      behavior: SnackBarBehavior.floating,
+                      backgroundColor: _primary,
+                    ),
+                  );
+                }
+              }
             } catch (e) {
+              if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
               );
@@ -471,6 +744,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                 );
               }
             } catch (e) {
+              if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
               );
@@ -553,6 +827,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                 );
               }
             } catch (e) {
+              if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
               );
@@ -569,6 +844,16 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                 const SizedBox(height: 12),
                 const Text('Notificaciones', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800)),
                 const SizedBox(height: 8),
+                if (_pendingPaymentsByService.isNotEmpty) ...[
+                  const Text('Pagos pendientes', style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                  ..._pendingPaymentsByService.values.map(_buildPaymentReminderCard),
+                  const SizedBox(height: 12),
+                  const Divider(),
+                  const SizedBox(height: 12),
+                  const Text('Ofertas en negociación', style: TextStyle(fontWeight: FontWeight.w700)),
+                  const SizedBox(height: 8),
+                ],
                 if (_offersLoading && _offers.isEmpty)
                   const Padding(padding: EdgeInsets.all(16), child: Center(child: CircularProgressIndicator()))
                 else if (_offersError != null)
@@ -617,23 +902,50 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                           if (montoTrab != null) 'Propuesta del trabajador: ' + _formatCurrency(montoTrab),
                           if (montoCliente != null) 'Tu oferta: ' + _formatCurrency(montoCliente),
                         ];
+                        final paymentInfo = _normalizePaymentInfo(
+                          o,
+                          fallbackOfferId: offerId,
+                          fallbackServiceId: serviceId,
+                          fallbackServiceTitle: serviceTitle,
+                        );
+                        final paymentStatusUpper = _paymentStatusUpper(
+                          paymentInfo?['paymentStatus'] ?? o['paymentStatus'] ?? o['estadoPago'],
+                        );
+                        if (paymentStatusUpper.isNotEmpty && paymentStatusUpper != 'NOT_REQUIRED') {
+                          subtitleLines.add('Estado de pago: ' + _paymentStatusLabel(paymentStatusUpper));
+                        }
                         final subtitleWidget = subtitleLines.isEmpty
                             ? null
                             : Text(subtitleLines.join('\n'));
                         final estadoNormalized = estadoRaw.toUpperCase();
                         final canRespond = offerId > 0 && (estadoNormalized.isEmpty || estadoNormalized == 'EN_NEGOCIACION') && _isClientTurn(turnoRaw);
+                        final waitingPayment = estadoNormalized == 'ACEPTADA' &&
+                            paymentStatusUpper.isNotEmpty &&
+                            paymentStatusUpper != 'SUCCEEDED' &&
+                            paymentStatusUpper != 'NOT_REQUIRED';
+                        final trailing = waitingPayment
+                            ? FilledButton.tonalIcon(
+                                icon: Icon(paymentStatusUpper == 'FAILED' ? Icons.refresh : Icons.lock_open),
+                                label: Text(paymentStatusUpper == 'FAILED' ? 'Reintentar pago' : 'Ir al checkout'),
+                                onPressed: () => _openPaymentCheckout(
+                                  offerId: offerId,
+                                  serviceId: serviceId,
+                                  initialInfo: paymentInfo,
+                                ),
+                              )
+                            : Wrap(
+                                spacing: 8,
+                                children: [
+                                  IconButton(tooltip: 'Aceptar', icon: const Icon(Icons.check_circle, color: Colors.green), onPressed: canRespond ? () => doAccept(offerId, serviceId) : null),
+                                  IconButton(tooltip: 'Rechazar', icon: const Icon(Icons.cancel, color: Colors.red), onPressed: canRespond ? () => doReject(offerId, serviceId) : null),
+                                  IconButton(tooltip: 'Contraoferta', icon: const Icon(Icons.swap_horiz, color: Colors.orange), onPressed: canRespond ? () => doCounter(offerId) : null),
+                                ],
+                              );
                         return ListTile(
                           leading: const CircleAvatar(child: Icon(Icons.campaign_outlined)),
                           title: Text(workerLabel + ' ofert?'),
                           subtitle: subtitleWidget,
-                          trailing: Wrap(
-                            spacing: 8,
-                            children: [
-                              IconButton(tooltip: 'Aceptar', icon: const Icon(Icons.check_circle, color: Colors.green), onPressed: canRespond ? () => doAccept(offerId, serviceId) : null),
-                              IconButton(tooltip: 'Rechazar', icon: const Icon(Icons.cancel, color: Colors.red), onPressed: canRespond ? () => doReject(offerId, serviceId) : null),
-                              IconButton(tooltip: 'Contraoferta', icon: const Icon(Icons.swap_horiz, color: Colors.orange), onPressed: canRespond ? () => doCounter(offerId) : null),
-                            ],
-                          ),
+                          trailing: trailing,
                         );
                       },
                     ),
@@ -644,6 +956,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
         });
       },
     );
+    _notificationsSetState = null;
   }
 
   Future<void> _openEditForm(int serviceId, Map<String, dynamic> initial) async {
@@ -821,88 +1134,101 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                       if (v is int) return v;
                       return int.tryParse(v.toString());
                     }();
+                    final editableServiceId = serviceId;
+                    final pendingPayment = _pendingPaymentForService(serviceId);
                     return Padding(
                       padding: const EdgeInsets.only(bottom: 12),
                       child: Card(
                         color: const Color(0xFFF6F1FF),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: const Color(0xFF7E57C2).withOpacity(0.12),
-                            child: const Icon(Icons.work_outline, color: Color(0xFF7E57C2)),
-                          ),
-                          title: Text(
-                            titulo.isEmpty ? 'Servicio' : titulo,
-                            style: const TextStyle(fontWeight: FontWeight.w700),
-                          ),
-                          subtitle: () {
-                            final parts = <String>[
-                              if (ubicacion.isNotEmpty) ubicacion,
-                              if (categoria.isNotEmpty) categoria,
-                              if (fechaTxt.isNotEmpty) 'Fecha: $fechaTxt',
-                              if (estadoLabel.isNotEmpty) 'Estado: $estadoLabel',
-                            ];
-                            if (parts.isEmpty) return null;
-                            return Text(parts.join(' - '));
-                          }(),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              () {
-                                Color statusColor = Colors.orange;
-                                switch (estadoUpper) {
-                                  case 'ASIGNADO':
-                                  case 'EN_PROCESO':
-                                  case 'EN_CURSO':
-                                    statusColor = Colors.blue;
-                                    break;
-                                  case 'FINALIZADO':
-                                    statusColor = Colors.green;
-                                    break;
-                                  case 'CANCELADO':
-                                    statusColor = Colors.red;
-                                    break;
-                                  default:
-                                    statusColor = Colors.orange;
-                                    break;
-                                }
-                                return Chip(
-                                  label: Text(estadoLabel),
-                                  backgroundColor: statusColor.withOpacity(0.1),
-                                  labelStyle: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
-                                );
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            ListTile(
+                              contentPadding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                              leading: CircleAvatar(
+                                backgroundColor: const Color(0xFF7E57C2).withOpacity(0.12),
+                                child: const Icon(Icons.work_outline, color: Color(0xFF7E57C2)),
+                              ),
+                              title: Text(
+                                titulo.isEmpty ? 'Servicio' : titulo,
+                                style: const TextStyle(fontWeight: FontWeight.w700),
+                              ),
+                              subtitle: () {
+                                final parts = <String>[
+                                  if (ubicacion.isNotEmpty) ubicacion,
+                                  if (categoria.isNotEmpty) categoria,
+                                  if (fechaTxt.isNotEmpty) 'Fecha: $fechaTxt',
+                                  if (estadoLabel.isNotEmpty) 'Estado: $estadoLabel',
+                                ];
+                                if (parts.isEmpty) return null;
+                                return Text(parts.join(' - '));
                               }(),
-                              if (estadoUpper == 'PENDIENTE' && serviceId != null) ...[
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  () {
+                                    Color statusColor = Colors.orange;
+                                    switch (estadoUpper) {
+                                      case 'ASIGNADO':
+                                      case 'EN_PROCESO':
+                                      case 'EN_CURSO':
+                                        statusColor = Colors.blue;
+                                        break;
+                                      case 'FINALIZADO':
+                                        statusColor = Colors.green;
+                                        break;
+                                      case 'CANCELADO':
+                                        statusColor = Colors.red;
+                                        break;
+                                      case 'PENDIENTE_PAGO':
+                                        statusColor = Colors.amber.shade800;
+                                        break;
+                                      default:
+                                        statusColor = Colors.orange;
+                                        break;
+                                    }
+                                    return Chip(
+                                      label: Text(estadoLabel),
+                                      backgroundColor: statusColor.withOpacity(0.1),
+                                      labelStyle: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
+                                    );
+                                  }(),
+                              if (estadoUpper == 'PENDIENTE' && editableServiceId != null) ...[
                                 const SizedBox(width: 6),
                                 PopupMenuButton<String>(
                                   tooltip: 'Opciones',
                                   onSelected: (value) {
                                     if (value == 'edit') {
-                                      _openEditForm(serviceId!, s);
+                                      _openEditForm(editableServiceId, s);
                                     } else if (value == 'delete') {
-                                      _confirmDelete(serviceId!);
+                                      _confirmDelete(editableServiceId);
                                     }
                                   },
-                                  itemBuilder: (context) => [
-                                    const PopupMenuItem(
-                                      value: 'edit',
-                                      child: ListTile(
-                                        leading: Icon(Icons.edit_outlined),
-                                        title: Text('Editar'),
-                                      ),
-                                    ),
-                                    const PopupMenuItem(
-                                      value: 'delete',
-                                      child: ListTile(
-                                        leading: Icon(Icons.delete_outline, color: Colors.red),
-                                        title: Text('Eliminar'),
-                                      ),
+                                      itemBuilder: (context) => [
+                                        const PopupMenuItem(
+                                          value: 'edit',
+                                          child: ListTile(
+                                            leading: Icon(Icons.edit_outlined),
+                                            title: Text('Editar'),
+                                          ),
+                                        ),
+                                        const PopupMenuItem(
+                                          value: 'delete',
+                                          child: ListTile(
+                                            leading: Icon(Icons.delete_outline, color: Colors.red),
+                                            title: Text('Eliminar'),
+                                          ),
+                                        ),
+                                      ],
                                     ),
                                   ],
-                                ),
-                              ],
-                            ],
-                          ),
+                                ],
+                              ),
+                            ),
+                            if (estadoUpper == 'PENDIENTE_PAGO')
+                              _buildServicePaymentBanner(serviceId, pendingPayment),
+                          ],
                         ),
                       ),
                     );
@@ -942,6 +1268,158 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
             onPressed: _showExpiredServicesSheet,
             child: const Text('Ver'),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPaymentReminderCard(Map<String, dynamic> info) {
+    final serviceId = _asInt(info['serviceId']);
+    final offerId = _asInt(info['offerId']);
+    final serviceTitle = (info['serviceTitle'] ?? _serviceTitleById(serviceId) ?? 'Servicio').toString();
+    final statusUpper = _paymentStatusUpper(info['paymentStatus']);
+    final label = _paymentStatusLabel(statusUpper);
+    final amount = _asDouble(info['amount']);
+    final isFailed = statusUpper == 'FAILED';
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: isFailed ? Colors.red.withOpacity(0.05) : Colors.orange.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: isFailed ? Colors.red.shade200 : Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(serviceTitle, style: const TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text('Estado: $label', style: TextStyle(color: _paymentStatusColor(statusUpper), fontWeight: FontWeight.w600)),
+          if (amount != null) Text('Monto: ${_formatCurrency(amount)}'),
+          const SizedBox(height: 6),
+          Text(
+            isFailed
+                ? 'El pago anterior fue rechazado. Puedes generar un nuevo intento desde el checkout.'
+                : 'Debes completar el pago para que el trabajador comience.',
+            style: const TextStyle(fontSize: 13),
+          ),
+          if (offerId != null && offerId > 0) ...[
+            const SizedBox(height: 10),
+            FilledButton.tonalIcon(
+              icon: Icon(isFailed ? Icons.refresh : Icons.lock_open),
+              label: Text(isFailed ? 'Reintentar pago' : 'Ir al checkout'),
+              onPressed: () => _openPaymentCheckout(
+                offerId: offerId,
+                serviceId: serviceId,
+                initialInfo: info,
+              ),
+            ),
+            TextButton.icon(
+              icon: const Icon(Icons.sync),
+              label: const Text('Actualizar estado'),
+              onPressed: () async {
+                try {
+                  await ApiService.refreshOfferPayment(offerId);
+                  final latest = await ApiService.getOfferPaymentInfo(offerId: offerId, refresh: true);
+                  _queuePaymentInfoUpdate(latest);
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('No se pudo actualizar: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+                  );
+                }
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildServicePaymentBanner(int? serviceId, Map<String, dynamic>? info) {
+    final normalized = info == null
+        ? null
+        : _normalizePaymentInfo(
+            info,
+            fallbackServiceId: serviceId,
+            fallbackServiceTitle: _serviceTitleById(serviceId),
+          );
+    final statusUpper = _paymentStatusUpper(normalized?['paymentStatus']);
+    final label = _paymentStatusLabel(statusUpper);
+    final amount = _asDouble(normalized?['amount']);
+    final offerId = _asInt(normalized?['offerId']);
+    final isFailed = statusUpper == 'FAILED';
+    final color = isFailed ? Colors.red.withOpacity(0.05) : Colors.orange.withOpacity(0.08);
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: isFailed ? Colors.red.shade200 : Colors.orange.shade200),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Pago pendiente', style: TextStyle(fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          Text('Estado actual: $label', style: TextStyle(color: _paymentStatusColor(statusUpper), fontWeight: FontWeight.w600)),
+          if (amount != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('Monto: ${_formatCurrency(amount)}')),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              isFailed
+                  ? 'Tu último intento fue rechazado. Puedes reintentar para que el trabajador empiece.'
+                  : 'Completa el pago para confirmar la asignación del trabajador.',
+              style: const TextStyle(fontSize: 13),
+            ),
+          ),
+          if (offerId != null && offerId > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FilledButton.icon(
+                    icon: Icon(isFailed ? Icons.refresh : Icons.lock_open),
+                    label: Text(isFailed ? 'Reintentar pago' : 'Ir al checkout'),
+                    onPressed: () => _openPaymentCheckout(
+                      offerId: offerId,
+                      serviceId: serviceId,
+                      initialInfo: normalized,
+                    ),
+                  ),
+                  TextButton.icon(
+                    icon: const Icon(Icons.sync),
+                    label: const Text('Actualizar estado'),
+                    onPressed: () async {
+                      try {
+                        if (offerId <= 0) return;
+                        await ApiService.refreshOfferPayment(offerId);
+                        final latest = await ApiService.getOfferPaymentInfo(offerId: offerId, refresh: true);
+                        _queuePaymentInfoUpdate(latest);
+                      } catch (e) {
+                        if (!mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('No se pudo actualizar: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+                        );
+                      }
+                    },
+                  ),
+                ],
+              ),
+            ),
+          if (offerId == null || offerId <= 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Text(
+                'Estamos sincronizando la información del pago. Si ya pagaste, usa el botón de actualizar en notificaciones.',
+                style: const TextStyle(fontSize: 13),
+              ),
+            ),
         ],
       ),
     );

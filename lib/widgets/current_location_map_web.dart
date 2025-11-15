@@ -14,7 +14,7 @@ class CurrentLocationMap extends StatefulWidget {
 
 class _CurrentLocationMapState extends State<CurrentLocationMap> {
   html.IFrameElement? _iframe;
-  String _viewType = 'web-simple-map-${DateTime.now().millisecondsSinceEpoch}';
+  late final String _viewType = 'web-simple-map-${DateTime.now().millisecondsSinceEpoch}';
 
   @override
   void initState() {
@@ -30,7 +30,8 @@ class _CurrentLocationMapState extends State<CurrentLocationMap> {
 
     // Intentar geolocalizar con la API del navegador.
     try {
-      html.window.navigator.geolocation?.getCurrentPosition().then((pos) {
+      final geolocation = html.window.navigator.geolocation;
+      geolocation.getCurrentPosition().then((pos) {
         final lat = pos.coords?.latitude ?? 4.7110;
         final lng = pos.coords?.longitude ?? -74.0721;
         _iframe!.src = 'https://www.google.com/maps?q='
