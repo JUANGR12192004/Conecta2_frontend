@@ -1,13 +1,16 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import '../services/api_service.dart';
+import '../services/api_service_payment.dart';
+import '../services/api_service_payment.dart';
 import '../widgets/account_management_sheet.dart';
 import '../widgets/profile_popover.dart';
 import '../utils/categories.dart';
 import '../widgets/current_location_map.dart';
-import '../widgets/payment_checkout_sheet.dart';
+import '../widgets/payment_checkout_helper.dart';
 
 const _primary = Color(0xFF2E7D32);
 
@@ -40,6 +43,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   Timer? _offersPollTimer;
   final Map<int, Map<String, dynamic>> _pendingPaymentsByService = {};
   StateSetter? _notificationsSetState;
+  final Set<int> _paymentPendingNotified = {};
 
   final List<String> _categorias = kServiceCategoryLabels.keys.toList();
 
@@ -264,6 +268,7 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     final amount = _asDouble(map['amount'] ?? map['monto'] ?? map['precio']);
     final currency = map['currency'] ?? map['moneda'];
     final serviceTitle = (map['serviceTitle'] ?? map['tituloServicio'] ?? fallbackServiceTitle ?? '').toString();
+    final publishableKey = map['paymentPublishableKey'] ?? map['publishableKey'];
 
     return {
       ...map,
@@ -275,7 +280,40 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       if (amount != null) 'amount': amount,
       if (currency != null) 'currency': currency,
       if (serviceTitle.isNotEmpty) 'serviceTitle': serviceTitle,
+      if (publishableKey != null) 'paymentPublishableKey': publishableKey,
     };
+  }
+
+  Future<void> _refreshPaymentStatus({
+    required Map<String, dynamic> current,
+    int? fallbackOfferId,
+    int? fallbackServiceId,
+    String? fallbackServiceTitle,
+  }) async {
+    final intentId = current['paymentIntentId'] ??
+        current['paymentIntent'] ??
+        current['intentId'] ??
+        current['id'];
+    if (intentId == null) return;
+    final response =
+        await ApiServicePayment.getPaymentStatus(paymentIntentId: intentId.toString());
+    final combined = <String, dynamic>{
+      ...current,
+      ...response,
+      if (fallbackOfferId != null) 'offerId': fallbackOfferId,
+      if (fallbackServiceId != null) 'serviceId': fallbackServiceId,
+      if (fallbackServiceTitle != null && fallbackServiceTitle.isNotEmpty)
+        'serviceTitle': fallbackServiceTitle,
+    };
+    final normalized = _normalizePaymentInfo(
+      combined,
+      fallbackOfferId: fallbackOfferId,
+      fallbackServiceId: fallbackServiceId,
+      fallbackServiceTitle: fallbackServiceTitle,
+    );
+    if (normalized != null) {
+      _queuePaymentInfoUpdate(normalized);
+    }
   }
 
   String _paymentStatusUpper(dynamic raw) {
@@ -583,6 +621,34 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
       }
     });
     _notificationsSetState?.call(() {});
+    _maybeNotifyPendingPayment(serviceId, info);
+  }
+
+  void _maybeNotifyPendingPayment(int serviceId, Map<String, dynamic> info) {
+    final statusUpper = _paymentStatusUpper(info['paymentStatus'] ?? info['status']);
+    if (statusUpper != 'PENDING') return;
+    if (_paymentPendingNotified.contains(serviceId)) return;
+    _paymentPendingNotified.add(serviceId);
+    final offerId = _asInt(info['offerId'] ?? info['ofertaId']);
+    final title = (info['serviceTitle'] ?? _serviceTitleById(serviceId) ?? 'tu servicio').toString();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('El trabajador aceptó $title. Procede al pago.'),
+        action: SnackBarAction(
+          label: 'Pagar',
+          onPressed: () {
+            if (offerId != null && offerId > 0) {
+              _openPaymentCheckout(
+                offerId: offerId,
+                serviceId: serviceId,
+                initialInfo: info,
+              );
+            }
+          },
+        ),
+      ),
+    );
   }
 
   void _syncPendingPaymentsFromOffers(List<Map<String, dynamic>> offers) {
@@ -627,26 +693,21 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
   }) async {
     final existing = initialInfo ?? _pendingPaymentForService(serviceId);
     final title = (existing?['serviceTitle'] ?? _serviceTitleById(serviceId) ?? '').toString();
-    await showModalBottomSheet<void>(
+    await showPaymentCheckout(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      useSafeArea: true,
-      builder: (_) => PaymentCheckoutSheet(
-        offerId: offerId,
-        serviceId: serviceId,
-        serviceTitle: title.isEmpty ? null : title,
-        initialPaymentInfo: existing,
-        onPaymentInfo: (info) {
-          _queuePaymentInfoUpdate(info);
-        },
-        onPaymentFailed: (info) {
-          _queuePaymentInfoUpdate(info);
-        },
-        onPaymentSucceeded: () async {
-          await _loadServices();
-        },
-      ),
+      offerId: offerId,
+      serviceId: serviceId,
+      serviceTitle: title.isEmpty ? null : title,
+      initialPaymentInfo: existing,
+      onPaymentInfo: (info) {
+        _queuePaymentInfoUpdate(info);
+      },
+      onPaymentFailed: (info) {
+        _queuePaymentInfoUpdate(info);
+      },
+      onPaymentSucceeded: () async {
+        await _loadServices();
+      },
     );
   }
 
@@ -669,67 +730,72 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                 }));
           }
 
-          Future<void> doAccept(int id, int? serviceId) async {
-            try {
-              final response = await ApiService.clientRespondOffer(offerId: id, action: 'ACCEPT');
-              final paymentInfo = _normalizePaymentInfo(
-                response,
-                fallbackOfferId: id,
-                fallbackServiceId: serviceId,
-                fallbackServiceTitle: _serviceTitleById(serviceId),
-              );
-              final statusUpper = _paymentStatusUpper(paymentInfo?['paymentStatus']);
-              final bool requiresPayment = statusUpper.isEmpty ||
-                  statusUpper == 'PENDING' ||
-                  statusUpper == 'REQUIRES_ACTION';
+              Future<void> doAccept(int id, int? serviceId) async {
+                try {
+                  final response = await ApiServicePayment.acceptOffer(
+                    offerId: id,
+                    payload: {
+                      'description': 'Servicio ${serviceId ?? ''}',
+                    },
+                  );
+                  final paymentIntent = response['paymentIntent'];
+                  final paymentInfo = _normalizePaymentInfo(
+                    paymentIntent ?? response,
+                    fallbackOfferId: id,
+                    fallbackServiceId: serviceId,
+                    fallbackServiceTitle: _serviceTitleById(serviceId),
+                  );
+                  final statusUpper = _paymentStatusUpper(paymentInfo?['paymentStatus']);
+                  final bool requiresPayment = statusUpper.isEmpty ||
+                      statusUpper == 'PENDING' ||
+                      statusUpper == 'REQUIRES_ACTION';
 
-              removeLocal(id);
-              if (paymentInfo != null) {
-                _queuePaymentInfoUpdate(paymentInfo);
-              }
+                  removeLocal(id);
+                  if (paymentInfo != null) {
+                    _queuePaymentInfoUpdate(paymentInfo);
+                  }
 
-              if (mounted && serviceId != null) {
-                _updateLocalServiceState(
-                  serviceId,
-                  requiresPayment ? 'PENDIENTE_PAGO' : 'ASIGNADO',
-                );
-              }
+                  if (mounted && serviceId != null) {
+                    _updateLocalServiceState(
+                      serviceId,
+                      requiresPayment ? 'PENDIENTE_PAGO' : 'ASIGNADO',
+                    );
+                  }
 
-              await _loadServices();
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(requiresPayment
+                            ? 'Oferta aceptada. Ya puedes pagar para asignar el servicio.'
+                            : 'Servicio asignado.'),
+                        behavior: SnackBarBehavior.floating,
+                        backgroundColor: _primary,
+                      ),
+                    );
+                  }
 
-              if (requiresPayment) {
-                if (mounted) {
+                  if (requiresPayment) {
+                    await _openPaymentCheckout(
+                      offerId: id,
+                      serviceId: serviceId,
+                      initialInfo: paymentInfo,
+                    );
+                  } else {
+                    await _loadServices();
+                  }
+                } on PaymentGatewayException catch (e) {
+                  if (!mounted) return;
+                  final message = _extractErrorMessage(e, fallback: 'No se pudo responder la oferta.');
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Oferta aceptada. Completa el pago para asignar el servicio.'),
-                      behavior: SnackBarBehavior.floating,
-                      backgroundColor: _primary,
-                    ),
+                    SnackBar(content: Text(message), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+                  );
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
                   );
                 }
-                await _openPaymentCheckout(
-                  offerId: id,
-                  serviceId: serviceId,
-                  initialInfo: paymentInfo,
-                );
-              } else {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Servicio asignado'),
-                      behavior: SnackBarBehavior.floating,
-                      backgroundColor: _primary,
-                    ),
-                  );
-                }
               }
-            } catch (e) {
-              if (!mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Error: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
-              );
-            }
-          }
 
           Future<void> doReject(int id, int? serviceId) async {
             try {
@@ -980,6 +1046,35 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     }
   }
 
+  String _extractErrorMessage(PaymentGatewayException e, {String fallback = 'Ocurrió un error'}) {
+    try {
+      final decoded = e.body.isNotEmpty ? jsonDecode(e.body) : null;
+      if (decoded is Map<String, dynamic>) {
+        if (decoded['error'] != null) {
+          return decoded['error'].toString();
+        }
+        if (decoded['mensaje'] != null) {
+          return decoded['mensaje'].toString();
+        }
+        if (decoded['errores'] is Iterable) {
+          final errors = (decoded['errores'] as Iterable)
+              .map((item) => item is Map<String, dynamic> && item['mensaje'] != null
+                  ? item['mensaje'].toString()
+                  : item?.toString())
+              .where((item) => item != null && item.isNotEmpty)
+              .cast<String>()
+              .toList();
+          if (errors.isNotEmpty) {
+            return errors.join('; ');
+          }
+        }
+      }
+    } catch (_) {
+      // ignore
+    }
+    return fallback;
+  }
+
   Future<void> _confirmDelete(int serviceId) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -1194,17 +1289,16 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                                       labelStyle: TextStyle(color: statusColor, fontWeight: FontWeight.w600),
                                     );
                                   }(),
-                              if (estadoUpper == 'PENDIENTE' && editableServiceId != null) ...[
-                                const SizedBox(width: 6),
-                                PopupMenuButton<String>(
-                                  tooltip: 'Opciones',
-                                  onSelected: (value) {
-                                    if (value == 'edit') {
-                                      _openEditForm(editableServiceId, s);
-                                    } else if (value == 'delete') {
-                                      _confirmDelete(editableServiceId);
-                                    }
-                                  },
+                                  if (estadoUpper == 'PENDIENTE' && editableServiceId != null)
+                                    PopupMenuButton<String>(
+                                      tooltip: 'Opciones',
+                                      onSelected: (value) {
+                                        if (value == 'edit') {
+                                          _openEditForm(editableServiceId, s);
+                                        } else if (value == 'delete') {
+                                          _confirmDelete(editableServiceId);
+                                        }
+                                      },
                                       itemBuilder: (context) => [
                                         const PopupMenuItem(
                                           value: 'edit',
@@ -1222,7 +1316,6 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                                         ),
                                       ],
                                     ),
-                                  ],
                                 ],
                               ),
                             ),
@@ -1277,9 +1370,15 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
     final serviceId = _asInt(info['serviceId']);
     final offerId = _asInt(info['offerId']);
     final serviceTitle = (info['serviceTitle'] ?? _serviceTitleById(serviceId) ?? 'Servicio').toString();
-    final statusUpper = _paymentStatusUpper(info['paymentStatus']);
+    final normalized = _normalizePaymentInfo(
+      info,
+      fallbackServiceId: serviceId,
+      fallbackOfferId: offerId,
+      fallbackServiceTitle: serviceTitle,
+    );
+    final statusUpper = _paymentStatusUpper(normalized?['paymentStatus']);
     final label = _paymentStatusLabel(statusUpper);
-    final amount = _asDouble(info['amount']);
+    final amount = _asDouble(normalized?['amount']);
     final isFailed = statusUpper == 'FAILED';
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 6),
@@ -1318,10 +1417,14 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
               icon: const Icon(Icons.sync),
               label: const Text('Actualizar estado'),
               onPressed: () async {
+                if (normalized == null) return;
                 try {
-                  await ApiService.refreshOfferPayment(offerId);
-                  final latest = await ApiService.getOfferPaymentInfo(offerId: offerId, refresh: true);
-                  _queuePaymentInfoUpdate(latest);
+                  await _refreshPaymentStatus(
+                    current: normalized,
+                    fallbackOfferId: offerId,
+                    fallbackServiceId: serviceId,
+                    fallbackServiceTitle: _serviceTitleById(serviceId),
+                  );
                 } catch (e) {
                   if (!mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -1396,11 +1499,14 @@ class _ClientHomeState extends State<ClientHome> with SingleTickerProviderStateM
                     icon: const Icon(Icons.sync),
                     label: const Text('Actualizar estado'),
                     onPressed: () async {
+                      if (offerId == null || normalized == null) return;
                       try {
-                        if (offerId <= 0) return;
-                        await ApiService.refreshOfferPayment(offerId);
-                        final latest = await ApiService.getOfferPaymentInfo(offerId: offerId, refresh: true);
-                        _queuePaymentInfoUpdate(latest);
+                        await _refreshPaymentStatus(
+                          current: normalized,
+                          fallbackOfferId: offerId,
+                          fallbackServiceId: serviceId,
+                          fallbackServiceTitle: _serviceTitleById(serviceId),
+                        );
                       } catch (e) {
                         if (!mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(

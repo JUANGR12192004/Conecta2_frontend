@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 import 'package:http/http.dart' as http;
 import '../utils/categories.dart';
 
@@ -11,7 +11,15 @@ class ApiService {
       ? "http://localhost:8080"
       : "http://localhost:8080";
   // Microservicio de pagos (pasarela). Se puede ajustar si corre en otro host/puerto.
-  static String paymentsHost = host;
+  static String get paymentsHost {
+    if (kIsWeb) {
+      return "http://localhost:8080";
+    }
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return "http://10.0.2.2:8080";
+    }
+    return "http://localhost:8080";
+  }
 
   static String get _apiPrefix => "/api/v1";
   static Uri _u(String path, {Map<String, String>? query}) =>
@@ -54,6 +62,9 @@ class ApiService {
     }
     return h;
   }
+
+  static Map<String, String> clientAuthHeaders() =>
+      _jsonHeaders(auth: true, role: 'client');
 
   // ==========================
   // TRABAJADORES
@@ -719,45 +730,6 @@ class ApiService {
         )
         .timeout(const Duration(seconds: 15));
     return _processResponse(res, "actualización de pago");
-  }
-
-  /// Confirma un intent directamente contra el microservicio de pasarela.
-  /// Endpoint: POST /payments/intents/{id}/confirm
-  static Future<Map<String, dynamic>> confirmPaymentIntent({
-    required String paymentIntentId,
-    required String clientSecret,
-    required Map<String, dynamic> paymentMethod,
-    Map<String, dynamic>? billingDetails,
-    Map<String, dynamic>? metadata,
-  }) async {
-    final body = <String, dynamic>{
-      "clientSecret": clientSecret,
-      "paymentMethod": paymentMethod,
-      if (billingDetails != null) "billingDetails": billingDetails,
-      if (metadata != null) "metadata": metadata,
-    };
-
-    final res = await http
-        .post(
-          _payments("/payments/intents/$paymentIntentId/confirm"),
-          headers: const {"Content-Type": "application/json"},
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 15));
-
-    if (res.statusCode == 200 || res.statusCode == 201) {
-      final decoded = res.body.isNotEmpty ? jsonDecode(res.body) : null;
-      if (decoded is Map<String, dynamic>) return decoded;
-      return {"ok": true, "raw": res.body};
-    }
-
-    if (res.statusCode == 400) {
-      throw Exception("Pasarela rechazó la confirmación (400): ${res.body}");
-    }
-
-    throw Exception(
-      "Error confirmando el pago (${res.statusCode}): ${res.body}",
-    );
   }
 
   static Future<List<Map<String, dynamic>>> getServicesByClientPublic(

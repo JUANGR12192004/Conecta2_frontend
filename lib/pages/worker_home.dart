@@ -5,6 +5,7 @@ import '../widgets/account_management_sheet.dart';
 import '../widgets/profile_popover.dart';
 import '../utils/categories.dart';
 import '../widgets/current_location_map.dart';
+import '../widgets/payment_checkout_helper.dart';
 
 const Color _workerPrimary = Color(0xFF1E88E5);
 const Color _workerSecondary = Color(0xFF64B5F6);
@@ -768,6 +769,7 @@ _buildMapCard(),
             int? serviceId,
           }) async {
             final upper = action.toUpperCase();
+            Map<String, dynamic>? response;
             try {
               if (upper == 'COUNTER') {
                 final counterMonto = monto;
@@ -780,7 +782,7 @@ _buildMapCard(),
                   mensaje: mensaje,
                 );
               } else {
-                await ApiService.workerRespondOffer(
+                response = await ApiService.workerRespondOffer(
                   offerId: offerId,
                   action: upper,
                   mensaje: mensaje,
@@ -815,6 +817,13 @@ _buildMapCard(),
                   backgroundColor: color,
                 ),
               );
+              if (upper == 'ACCEPT' && _requiresPayment(response)) {
+                await _openWorkerPaymentCheckout(
+                  offerId: offerId,
+                  serviceId: serviceId,
+                  paymentInfo: response,
+                );
+              }
             } catch (e) {
               if (!mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
@@ -1225,6 +1234,49 @@ if (_opError != null) {
         ),
       ),
     );
+  }
+
+  bool _requiresPayment(Map<String, dynamic>? info) {
+    if (info == null) return false;
+    final status = _paymentStatusUpper(
+      info['paymentStatus'] ??
+          info['payment_state'] ??
+          info['payment_status'] ??
+          info['status'],
+    );
+    if (status != 'REQUIRES_ACTION' && status != 'PENDING') return false;
+    final intentId = info['paymentIntentId'] ??
+        info['payment_intent_id'] ??
+        info['paymentIntent'] ??
+        info['intentId'];
+    final clientSecret = info['paymentClientSecret'] ??
+        info['payment_client_secret'] ??
+        info['clientSecret'];
+    return intentId != null && clientSecret != null;
+  }
+
+  Future<void> _openWorkerPaymentCheckout({
+    required int offerId,
+    int? serviceId,
+    Map<String, dynamic>? paymentInfo,
+  }) async {
+    await showPaymentCheckout(
+      context: context,
+      offerId: offerId,
+      serviceId: serviceId,
+      serviceTitle: null,
+      initialPaymentInfo: paymentInfo,
+      onPaymentSucceeded: () async {
+        await _fetchOpportunities();
+      },
+    );
+  }
+
+  String _paymentStatusUpper(dynamic raw) {
+    if (raw == null) return '';
+    final text = raw.toString().trim();
+    if (text.isEmpty) return '';
+    return text.toUpperCase();
   }
 }
 

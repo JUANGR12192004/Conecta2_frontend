@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 
 import '../services/api_service.dart';
+import '../services/api_service_payment.dart';
 
 class PaymentCheckoutSheet extends StatefulWidget {
   final int offerId;
@@ -37,9 +39,8 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
   bool _didNotifyFailure = false;
   String? _error;
 
-  final TextEditingController _cardCtrl =
-      TextEditingController(text: '4242424242424242');
   final TextEditingController _nameCtrl = TextEditingController();
+  final TextEditingController _cardCtrl = TextEditingController(text: '4242424242424242');
   final TextEditingController _expCtrl = TextEditingController(text: '12/30');
   final TextEditingController _cvcCtrl = TextEditingController(text: '123');
 
@@ -51,9 +52,9 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
       _paymentInfo = initial;
       _loading = false;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _applyInfo(initial);
-        }
+        if (!mounted) return;
+        _applyInfo(initial);
+        _fetchInfo(refresh: true);
       });
     } else {
       _fetchInfo();
@@ -62,8 +63,8 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
 
   @override
   void dispose() {
-    _cardCtrl.dispose();
     _nameCtrl.dispose();
+    _cardCtrl.dispose();
     _expCtrl.dispose();
     _cvcCtrl.dispose();
     super.dispose();
@@ -77,17 +78,16 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
       _error = null;
     });
     try {
-      final info = await ApiService.getOfferPaymentInfo(
-        offerId: widget.offerId,
-        refresh: refresh,
-      );
-      if (!mounted) return;
-      _applyInfo(info);
+      if (refresh) {
+        await _refreshIntentStatus();
+      } else {
+        await _ensureIntent();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = e.toString().replaceFirst('Exception: ', '');
+        _error = _describeError(e);
       });
     }
   }
@@ -111,26 +111,32 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
     }
   }
 
+  void _requireClientAuth() {
+    if (ApiService.clientToken == null) {
+      throw Exception('Necesitas iniciar sesión como cliente antes de usar el checkout.');
+    }
+  }
+
+  String _describeError(Object error) {
+    if (error is PaymentGatewayException) {
+      try {
+        final decoded = error.body.isNotEmpty ? jsonDecode(error.body) : null;
+        if (decoded is Map<String, dynamic> && decoded['error'] != null) {
+          return decoded['error'].toString();
+        }
+      } catch (_) {
+        // ignore
+      }
+      final fallback = error.body.isNotEmpty ? error.body : 'Error desconocido';
+      return fallback;
+    }
+    return error.toString().replaceFirst('Exception: ', '');
+  }
+
   String _statusUpper() {
     final status = _paymentInfo?['paymentStatus'] ?? _paymentInfo?['status'];
     if (status == null) return '';
-    final text = status.toString().trim();
-    return text.toUpperCase();
-  }
-
-  String _statusLabel() {
-    switch (_statusUpper()) {
-      case 'PENDING':
-        return 'Pago pendiente';
-      case 'REQUIRES_ACTION':
-        return 'Se requiere acción';
-      case 'SUCCEEDED':
-        return 'Pago confirmado';
-      case 'FAILED':
-        return 'Pago rechazado';
-      default:
-        return 'Estado desconocido';
-    }
+    return status.toString().trim().toUpperCase();
   }
 
   Color _statusColor() {
@@ -162,9 +168,15 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
     return text.isEmpty ? 'COP' : text;
   }
 
-  String? _intentId() => _paymentInfo?['paymentIntentId']?.toString();
+  String? _intentId() {
+    return _paymentInfo?['paymentIntentId']?.toString() ??
+        _paymentInfo?['id']?.toString();
+  }
 
-  String? _clientSecret() => _paymentInfo?['paymentClientSecret']?.toString();
+  String? _clientSecret() {
+    return _paymentInfo?['paymentClientSecret']?.toString() ??
+        _paymentInfo?['clientSecret']?.toString();
+  }
 
   bool get _canSubmit {
     if (_paymentInfo == null) return false;
@@ -181,69 +193,23 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
       });
       return;
     }
-
-    final holder = _nameCtrl.text.trim().isEmpty
-        ? 'Cliente Conecta2'
-        : _nameCtrl.text.trim();
-    final cardNumber = _cardCtrl.text.trim();
-    final expText = _expCtrl.text.trim();
-    final expMatch = RegExp(r'^(\d{2})/(\d{2})$').firstMatch(expText);
-    if (expMatch == null) {
-      setState(() {
-        _error = 'Formato de fecha inválido. Usa MM/AA';
-      });
-      return;
-    }
-    final expMonth = int.tryParse(expMatch.group(1)!);
-    final expYear = int.tryParse(expMatch.group(2)!);
-    if (expMonth == null || expMonth < 1 || expMonth > 12) {
-      setState(() {
-        _error = 'Mes inválido';
-      });
-      return;
-    }
-    if (expYear == null) {
-      setState(() {
-        _error = 'Año inválido';
-      });
-      return;
-    }
-
+    _requireClientAuth();
     setState(() {
       _submitting = true;
       _error = null;
     });
-
     try {
-      await ApiService.confirmPaymentIntent(
+      await ApiServicePayment.confirmPayment(
         paymentIntentId: intentId,
-        clientSecret: clientSecret,
-        paymentMethod: {
-          'type': 'CARD',
-          'card': {
-            'number': cardNumber,
-            'expMonth': expMonth,
-            'expYear': 2000 + expYear,
-            'cvc': _cvcCtrl.text.trim(),
-            'holder': holder,
-          },
-        },
-        billingDetails: {
-          'name': holder,
-        },
-        metadata: {
-          'offerId': widget.offerId,
-          if (widget.serviceId != null) 'serviceId': widget.serviceId,
-          'origin': 'Conecta2-frontend',
-        },
+        paymentMethod: 'pm_card_visa',
       );
       if (!mounted) return;
-      await _fetchInfo(refresh: true);
+      await _refreshIntentStatus();
       await _startPolling();
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = e.toString().replaceFirst('Exception: ', '');
+        _error = _describeError(e);
         _submitting = false;
       });
     }
@@ -251,37 +217,136 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
 
   Future<void> _startPolling() async {
     if (_polling) return;
-    setState(() {
-      _polling = true;
-    });
+    setState(() => _polling = true);
     for (int i = 0; i < 8 && mounted; i++) {
       await Future.delayed(const Duration(seconds: 3));
       try {
-        final info = await ApiService.getOfferPaymentInfo(
-          offerId: widget.offerId,
-          refresh: true,
-        );
+        await _refreshIntentStatus();
         if (!mounted) return;
-        _applyInfo(info);
         final status = _statusUpper();
-        if (status == 'SUCCEEDED' || status == 'FAILED') {
-          break;
-        }
+        if (status == 'SUCCEEDED' || status == 'FAILED') break;
       } catch (e) {
         if (!mounted) return;
         setState(() {
-          _error = e.toString().replaceFirst('Exception: ', '');
+          _error = _describeError(e);
         });
       }
     }
     if (!mounted) return;
-    setState(() {
-      _polling = false;
-    });
+    setState(() => _polling = false);
+  }
+
+  Future<void> _ensureIntent() async {
+    final intentId = _intentId();
+    final secret = _clientSecret();
+    _requireClientAuth();
+    if (intentId != null && intentId.isNotEmpty && secret != null && secret.isNotEmpty) {
+      return;
+    }
+    await _createIntent();
+  }
+
+  Future<void> _refreshIntentStatus() async {
+    final intentId = _intentId();
+    if (intentId == null || intentId.isEmpty) {
+      await _createIntent();
+      return;
+    }
+    _requireClientAuth();
+    try {
+      final response = await ApiServicePayment.getPaymentStatus(paymentIntentId: intentId);
+      await _applyGatewayResponse(response);
+    } on PaymentGatewayException catch (e) {
+      if (e.statusCode == 404) {
+        await _createIntent();
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> _createIntent() async {
+    final amountCents = _amountInCents();
+    if (amountCents == null || amountCents <= 0) {
+      throw Exception('Monto inválido para crear el pago.');
+    }
+    _requireClientAuth();
+    final response = await ApiServicePayment.createIntent(
+      amount: amountCents,
+      description: _descriptionForIntent(),
+      paymentMethodTypes: ['card'],
+      metadata: _metadataForIntent(),
+    );
+    await _applyGatewayResponse(response);
+  }
+
+  Future<void> _applyGatewayResponse(Map<String, dynamic> response) async {
+    if (response.isEmpty) return;
+    final normalized = _normalizeGatewayIntent(response);
+    if (normalized.isEmpty) return;
+    final merged = <String, dynamic>{...? _paymentInfo, ...normalized};
+    if (!mounted) return;
+    _applyInfo(merged);
+  }
+
+  Map<String, dynamic> _normalizeGatewayIntent(Map<String, dynamic> response) {
+    final normalized = <String, dynamic>{};
+    final intentValue = response['id'] ?? response['paymentIntentId'];
+    final statusValue = response['status'] ?? response['paymentStatus'];
+    final secretValue = response['clientSecret'] ?? response['paymentClientSecret'];
+    final methodValue = response['paymentMethod'];
+    final customerValue = response['customer'];
+    final lastErrorValue = response['lastPaymentError'];
+    final publishableKey = response['publishableKey'] ?? response['paymentPublishableKey'];
+    final amountValue = response['amount'];
+    final currencyValue = response['currency'];
+    if (intentValue != null) normalized['paymentIntentId'] = intentValue;
+    if (statusValue != null) normalized['paymentStatus'] = statusValue;
+    if (secretValue != null) normalized['paymentClientSecret'] = secretValue;
+    if (methodValue != null) normalized['paymentMethod'] = methodValue;
+    if (customerValue != null) normalized['customer'] = customerValue;
+    if (lastErrorValue != null) normalized['lastPaymentError'] = lastErrorValue;
+    if (publishableKey != null) normalized['paymentPublishableKey'] = publishableKey;
+    if (amountValue != null) {
+      if (amountValue is num) {
+        normalized['amount'] = amountValue / 100;
+      } else if (amountValue is String) {
+        final parsed = double.tryParse(amountValue);
+        if (parsed != null) normalized['amount'] = parsed / 100;
+      }
+    }
+    if (currencyValue != null) normalized['currency'] = currencyValue;
+    if (response['metadata'] != null) normalized['metadata'] = response['metadata'];
+    return normalized;
+  }
+
+  int? _amountInCents() {
+    final amount = _amount();
+    if (amount == null) return null;
+    return (amount * 100).round();
+  }
+
+  String _descriptionForIntent() {
+    final title = widget.serviceTitle?.trim();
+    if (title != null && title.isNotEmpty) {
+      return title;
+    }
+    return 'Servicio en Conecta2';
+  }
+
+  Map<String, dynamic> _metadataForIntent() {
+    final metadata = <String, dynamic>{
+      'offerId': widget.offerId,
+      'origin': 'Conecta2-frontend',
+    };
+    if (widget.serviceId != null) {
+      metadata['serviceId'] = widget.serviceId;
+    }
+    return metadata;
   }
 
   Widget _buildStatusTile() {
-    final status = _statusLabel();
+    final status = _statusUpper();
     final color = _statusColor();
     return Container(
       width: double.infinity,
@@ -295,9 +360,9 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
           CircleAvatar(
             backgroundColor: color.withOpacity(0.16),
             child: Icon(
-              _statusUpper() == 'SUCCEEDED'
+              status == 'SUCCEEDED'
                   ? Icons.check
-                  : (_statusUpper() == 'FAILED'
+                  : (status == 'FAILED'
                       ? Icons.error_outline
                       : Icons.lock_clock),
               color: color,
@@ -311,9 +376,9 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
                 Text(status, style: TextStyle(color: color, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 4),
                 Text(
-                  _statusUpper() == 'SUCCEEDED'
+                  status == 'SUCCEEDED'
                       ? 'Tu pago fue confirmado por la pasarela.'
-                      : _statusUpper() == 'FAILED'
+                      : status == 'FAILED'
                           ? 'El intento de pago fue rechazado. Revisa los datos o intenta nuevamente.'
                           : 'Ingresa los datos de la tarjeta simulada y presiona "Pagar".',
                 ),
@@ -397,8 +462,8 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     final serviceTitle = widget.serviceTitle?.trim();
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
     return SafeArea(
       child: Padding(
         padding: EdgeInsets.fromLTRB(20, 16, 20, bottomInset + 16),
@@ -423,7 +488,7 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
               ),
               const SizedBox(height: 4),
               Text(
-                'Oferta #${widget.offerId} • ${serviceTitle?.isNotEmpty == true ? serviceTitle : 'Servicio'}',
+                'Oferta #${widget.offerId} · ${serviceTitle?.isNotEmpty == true ? serviceTitle : 'Servicio'}',
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
               const SizedBox(height: 16),
@@ -454,9 +519,7 @@ class _PaymentCheckoutSheetState extends State<PaymentCheckoutSheet> {
                   const SizedBox(height: 16),
                   FilledButton(
                     onPressed: _canSubmit ? _confirmPayment : null,
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 48),
-                    ),
+                    style: FilledButton.styleFrom(minimumSize: const Size(double.infinity, 48)),
                     child: Text(_submitting || _polling ? 'Procesando...' : 'Pagar ahora'),
                   ),
                   const SizedBox(height: 8),
