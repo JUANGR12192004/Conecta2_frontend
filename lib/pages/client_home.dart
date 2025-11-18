@@ -584,6 +584,8 @@ class _ClientHomeState extends State<ClientHome>
   }
 
   Future<void> _reload() async {
+    // Refresca perfil y servicios en un solo gesto
+    await _refreshProfile();
     await _loadServices();
   }
 
@@ -1444,6 +1446,11 @@ class _ClientHomeState extends State<ClientHome>
             ),
             tooltip: 'Notificaciones',
             onPressed: _openNotifications,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh_outlined, color: Colors.black87),
+            tooltip: 'Actualizar',
+            onPressed: _reload,
           ),
           Padding(
               padding: const EdgeInsets.only(right: 14),

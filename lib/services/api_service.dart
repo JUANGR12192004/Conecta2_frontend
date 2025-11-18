@@ -858,10 +858,15 @@ class ApiService {
       decoded = null;
     }
 
-    if (status == 200 || status == 201) {
-      return (decoded is Map<String, dynamic>)
-          ? decoded
-          : {"ok": true, "raw": body};
+    if (status >= 200 && status < 300) {
+      // Acepta 200/201 con JSON o texto y 202/204 sin cuerpo como éxito.
+      if (decoded is Map<String, dynamic>) {
+        return decoded;
+      }
+      if (body.isEmpty) {
+        return {"ok": true};
+      }
+      return {"ok": true, "raw": body};
     }
     if (status == 400) {
       throw Exception(_msg(decoded, fallback: "Petición inválida ($proceso)"));
